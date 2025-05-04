@@ -1179,8 +1179,190 @@ def setup_addon_config_dialog():
 setup_addon_config_dialog()
 
 
-# New menu action to process JSON input
 def on_process_json_triggered():
+    """Displays the JSON input dialog and processes the input."""
+
+    class JsonInputDialog(QDialog):
+        def __init__(self, parent=None):
+            super().__init__(parent or mw)
+            self._close_event_has_cleaned_up = True
+            self.setWindowTitle("Process JSON Input")
+            self.resize(400, 300)
+
+            # Layout setup
+            layout = QVBoxLayout(self)
+            self.json_input = QTextEdit(
+                self
+            )  # Replaced QLineEdit with QTextEdit for multiline input
+            # text_option = QTextOption(Qt.AlignmentFlag.AlignLeft)
+            # text_option.setTextDirection(Qt.LayoutDirection.RightToLeft)
+            # self.json_input.document().setDefaultTextOption(text_option)
+            self.json_input.setPlaceholderText("Enter JSON list here...")
+            layout.addWidget(self.json_input)
+
+            # Deck and note type selection
+            self.notetype_combo = QWidget(self)
+            self.deck_combo = QWidget(self)
+            self.setup_choosers()
+
+            # self.deck_combo = QComboBox(self)
+            # self.deck_combo.addItems(
+            #     [deck.name for deck in mw.col.decks.all_names_and_ids()]
+            # )
+            layout.addWidget(self.notetype_combo)
+            layout.addWidget(self.deck_combo)
+
+            # self.notetype_combo = QComboBox(self)
+            # self.notetype_combo.addItems(
+            #     [nt.name for nt in mw.col.models.all_names_and_ids()]
+            # )
+
+
+            # Action buttons
+            buttons = QDialogButtonBox(
+                QDialogButtonBox.StandardButton.Ok
+                | QDialogButtonBox.StandardButton.Cancel,
+                self,
+            )
+            buttons.accepted.connect(self.accept)
+            buttons.rejected.connect(self.reject)
+            # layout.addWidget(buttons)
+
+            # Add this just before layout.addWidget(buttons)
+            button_row = QHBoxLayout()
+            self.insert_template_button = QPushButton("Insert JSON Template")
+            self.insert_template_button.clicked.connect(self.insert_json_template)
+            button_row.addWidget(self.insert_template_button)
+            button_row.addStretch()  # Pushes buttons to opposite ends
+            button_row.addWidget(buttons)
+            layout.addLayout(button_row)
+
+
+        def setup_choosers(self) -> None:
+            defaults = mw.col.defaults_for_adding(current_review_card=mw.reviewer.card)
+
+            self.notetype_chooser = NotetypeChooser(
+                mw=mw,
+                widget=self.notetype_combo,
+                starting_notetype_id=NotetypeId(defaults.notetype_id),
+                # on_button_activated=lambda *_: None,
+                # on_button_activated=self.show_notetype_selector,
+                on_notetype_changed=lambda *_: None,
+                # on_notetype_changed=self.on_notetype_change,
+            )
+
+            self.deck_chooser = DeckChooser(
+                mw=mw,
+                widget=self.deck_combo,
+                starting_deck_id=DeckId(defaults.deck_id),
+                on_deck_changed=lambda *_: None,
+                # on_deck_changed=self.on_deck_changed,
+            )
+
+        def insert_json_template(self):
+            """Populate the JSON input with a template for the current notetype."""
+            try:
+                note_type_id = self.notetype_chooser.selected_notetype_id
+                note_type = mw.col.models.get(note_type_id)
+                field_names = [f["name"] for f in note_type["flds"]]
+                template = [{field: "" for field in field_names}]
+                self.json_input.setPlainText(json.dumps(template, indent=4))
+            except Exception as e:
+                showInfo(f"Error generating template: {e}")
+
+        def get_input_data(self):
+            """Return the user input for JSON, deck, and note type."""
+            return {
+                "json_data": self.json_input.toPlainText(),  # Get the text from QTextEdit
+                "deck": self.deck_chooser.selected_deck_id,  # self.deck_combo.currentText(),
+                "notetype": self.notetype_chooser.selected_notetype_id,  # self.notetype_combo.currentText(),
+            }
+
+        # @log_method_calls
+        def _close(self) -> None:
+            self.notetype_chooser.cleanup()
+            self.deck_chooser.cleanup()
+            self._close_event_has_cleaned_up = True
+            mw.deferred_delete_and_garbage_collect(self)
+            self.close()
+
+    dialog = JsonInputDialog()
+    if dialog.exec() == QDialog.DialogCode.Accepted:
+        input_data = dialog.get_input_data()
+        dialog._close()
+
+        json_data = input_data["json_data"]
+
+        deck_id = input_data["deck"]
+        deck_name = mw.col.decks.get(deck_id)["name"]
+
+        note_type_id = input_data["notetype"]
+        note_type = mw.col.models.get(note_type_id)
+        note_type_name = note_type["name"]
+        
+
+        try:
+            notes_json_data = json.loads(json_data)  # Parse the JSON input
+        except json.JSONDecodeError:
+            logger.error("Invalid JSON input.")
+            return
+
+        if not is_valid_cards_data(notes_json_data):
+            logger.error(
+                f"JSON needs to be list or dicts, was: {notes_json_data}, returning."
+            )
+            return
+
+        if not notes_json_data:
+            logger.info("No cards found, returning.")
+            return
+
+        logger.debug(
+            "Got this python data:\n\n%r\n\nfrom this json input:\n\n%r",
+            notes_json_data,
+            json_data,
+        )
+
+
+        # Add the new tag from config value (json_tag is guaranteed to exist)
+        json_tag = config["json_tag"]
+
+        # Now, use the card confirmation dialog
+        gp = GeminiPrompts(manual_execution=True)
+
+        dummy_note = Note(mw.col, note_type)
+
+        confirmed_cards = gp.display_cards_confirmation_dialog(
+            {dummy_note: notes_json_data}
+        )
+
+        if not confirmed_cards:
+            return
+
+        new_cards = confirmed_cards
+
+        for note, cards_data in new_cards.items():
+            gp.add_new_notes(
+                note,
+                cards_data,
+                deck_id=deck_id,
+                note_type=note_type_id,
+                note_tag=json_tag,
+            )
+
+            # Add the new tag to each note
+            # for note in mw.col.find_notes(f"deck:{deck_name}"):
+            #     note = mw.col.get_note(note)
+            #     note.tags.append(json_tag)
+            #     mw.col.update_note(note)
+
+            logger.info(
+                f"Processed JSON input for deck {deck_name} and note type {note_type_name}."
+            )
+
+
+# New menu action to process JSON input
+def _on_process_json_triggered(): # old version
     """Displays the JSON input dialog and processes the input."""
 
     # Configure logging
@@ -1276,7 +1458,7 @@ def on_process_json_triggered():
                 mw=mw,
                 widget=self.notetype_combo,
                 starting_notetype_id=NotetypeId(defaults.notetype_id),
-                on_button_activated=lambda *_: None,
+                # on_button_activated=lambda *_: None,
                 # on_button_activated=self.show_notetype_selector,
                 on_notetype_changed=lambda *_: None,
                 # on_notetype_changed=self.on_notetype_change,
