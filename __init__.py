@@ -45,6 +45,8 @@ from aqt.qt import (
     QFrame,
     Qt,
     QComboBox,
+    QTabWidget,
+    QApplication
 )
 from proto.message import copy
 
@@ -84,7 +86,16 @@ def is_valid_card_data(item):
         return False
 
     if not all(
-        isinstance(k, str) and (isinstance(v, str) or v is None)
+        isinstance(k, str)
+        and (
+            isinstance(v, str)
+            or v is None
+            or (
+                k == "tags"
+                and isinstance(v, list)
+                and all(isinstance(it, str) for it in v)
+            )
+        )
         for k, v in item.items()
     ):
         return False
@@ -380,13 +391,14 @@ class GeminiPrompts:
         if manual_execution:
             showInfo("Finished processing notes.")
 
-    def example_notes(self, note_type: NoteType) -> str:
-        examples = (
-            [
-                {k: mw.col.media.strip(v) for k, v in mw.col.get_note(nid).items()}
-                for nid in random.sample(mw.col.models.nids(note_type), 10)
-            ],
-        )
+    def example_notes(self, note_type: NoteType, n:int = 10) -> str:
+        examples = []
+        for nid in random.sample(mw.col.models.nids(note_type), n):
+            note = mw.col.get_note(nid)
+            example = {k: mw.col.media.strip(v) for k, v in note.items()}
+            example["tags"] = list(note.tags)
+            examples.append(example)
+
         return json.dumps(
             examples,
             indent=2,
@@ -563,6 +575,9 @@ class GeminiPrompts:
             # Assuming all fields are required
             schema["required"].append(name)
 
+        schema["required"].append("tags")
+        schema["properties"]["tags"] = {"type": "array", "items": {"type": "string"}}
+
         logger.debug("Generated schema: %s", schema)
 
         return schema
@@ -618,7 +633,12 @@ class GeminiPrompts:
         logger.info("Updated note: %s", card_data)
 
     def add_new_notes(
-        self, original_note, cards_data, deck_id=None, note_type=None, note_tag=None
+        self,
+        original_note,
+        cards_data,
+        deck_id=None,
+        note_type=None,
+        note_tag: None | str | list[str] = None,
     ):
         """Adds new notes based on the cards_data."""
         col = mw.col
@@ -630,11 +650,22 @@ class GeminiPrompts:
         for card_data in cards_data:
             new_note = Note(col, note_type)
             new_notes.append(new_note)
+
+            tags = set(card_data.pop("tags", []))
+
             for field_name, field_value in card_data.items():
                 if field_name in new_note:
                     new_note[field_name] = field_value
-            if note_tag:
-                new_note.tags.append(note_tag)
+
+            if isinstance(note_tag, str):
+                tags.add(note_tag)
+
+            if isinstance(note_tag, list):
+                tags.update(note_tag)
+
+            for tag in tags:
+                new_note.tags.append(tag)
+
             col.add_note(note=new_note, deck_id=deck_id)
             logger.info("Added new note: %s", card_data)
 
@@ -689,7 +720,9 @@ class GeminiPrompts:
     def get_effective_config_for_note(self, note: Note):
         return self.get_effective_config(note.note_type()["id"], note.cards()[0].did)
 
-    def display_cards_confirmation_dialog(self, cards_data, parent=None):
+    def display_cards_confirmation_dialog(
+        self, cards_data, parent=None, global_tags: None | list[str] = None
+    ):
         """
         Displays a custom dialog to confirm the addition of new cards.
 
@@ -702,7 +735,9 @@ class GeminiPrompts:
         outer_parent = parent or mw
 
         class ConfirmationDialog(QDialog):
-            def __init__(self, cards, parent=None):
+            def __init__(
+                self, cards, parent=None, global_tags: None | list[str] = None
+            ):
                 super().__init__(parent or outer_parent)
                 self.mw = mw
                 self.setWindowTitle("Confirm New Cards")
@@ -766,6 +801,12 @@ class GeminiPrompts:
                         card_layout.addLayout(field_layout)
                         field_widgets[field] = field_edit
 
+                    if "tags" in card:
+                        found_keys.add("tags")
+                        tags = card["tags"]
+                    else:
+                        tags = []
+
                     unused_keys = [key for key in card if key not in found_keys]
                     if unused_keys:
                         rest_layout = QHBoxLayout()
@@ -778,7 +819,7 @@ class GeminiPrompts:
                         rest_layout.addWidget(rest_edit)
                         card_layout.addLayout(rest_layout)
 
-                    card_tag_edit = self.get_card_tag_edit(card_layout)
+                    card_tag_edit = self.get_card_tag_edit(tags, card_layout)
 
                     self.card_widgets.append(
                         (card_checkbox, field_widgets, note, card_tag_edit)
@@ -805,7 +846,8 @@ class GeminiPrompts:
 
                 main_layout.addLayout(bulk_action_layout)
 
-                self.setup_global_tag_edit()
+                global_tags = [] if global_tags is None else global_tags
+                self.setup_global_tag_edit(global_tags)
 
                 # Buttons
                 buttons = QDialogButtonBox(
@@ -817,7 +859,7 @@ class GeminiPrompts:
 
                 main_layout.addWidget(buttons)
 
-            def setup_global_tag_edit(self) -> None:
+            def setup_global_tag_edit(self, global_tags) -> None:
                 tag_edit_frame = QWidget(self)
                 tag_edit_frame.setStyleSheet("border: 0")
                 tag_edit_layout = QGridLayout()
@@ -831,6 +873,7 @@ class GeminiPrompts:
                 self.global_tag_edit.setToolTip(
                     shortcut(tr.editing_jump_to_tags_with_ctrlandshiftandt())
                 )
+
                 border = theme_manager.var(colors.BORDER)
                 self.global_tag_edit.setStyleSheet(f"border: 1px solid {border}")
                 tag_edit_layout.addWidget(self.global_tag_edit, 1, 1)
@@ -840,7 +883,9 @@ class GeminiPrompts:
                 if self.global_tag_edit.col != self.mw.col:
                     self.global_tag_edit.setCol(self.mw.col)
 
-            def get_card_tag_edit(self, card_layout):
+                self.global_tag_edit.setText(self.mw.col.tags.join(global_tags))
+
+            def get_card_tag_edit(self, tags: list[str], card_layout):
                 tag_layout = QHBoxLayout()
                 tag_label = QLabel(f"{tr.editing_tags()}:")
 
@@ -852,6 +897,8 @@ class GeminiPrompts:
 
                 if tag_edit.col != self.mw.col:
                     tag_edit.setCol(self.mw.col)
+
+                tag_edit.setText(self.mw.col.tags.join(tags))
 
                 tag_layout.addWidget(tag_label)
                 tag_layout.addWidget(tag_edit)
@@ -876,19 +923,25 @@ class GeminiPrompts:
                     checkbox.setChecked(not checkbox.isChecked())
 
             def get_confirmed_cards(self):
-                global_tags = mw.col.tags.split(self.global_tag_edit.text())
+                global_tags = self.mw.col.tags.split(self.global_tag_edit.text())
                 confirmed_cards = {}
                 for selected, (_, fields, note, tag_edit) in zip(
                     self.selected_cards, self.card_widgets
                 ):
                     if selected:
+                        tags = set(self.mw.col.tags.split(tag_edit.text()))
+                        tags.update(global_tags)
+
                         updated_card = {
                             field: widget.text() for field, widget in fields.items()
                         }
+
+                        updated_card["tags"] = list(tags)
+
                         confirmed_cards.setdefault(note, []).append(updated_card)
                 return confirmed_cards
 
-        dialog = ConfirmationDialog(cards_data)
+        dialog = ConfirmationDialog(cards=cards_data, global_tags=global_tags)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             return dialog.get_confirmed_cards()
         return []
@@ -982,13 +1035,9 @@ class GeminiPrompts:
                             logger.debug("Couldn't get editor content size")
                             return
 
-                        editor_widget.setMinimumSize(
-                            size
-                        )
+                        editor_widget.setMinimumSize(size)
 
-                    note_editor.web.loadFinished.connect(
-                        set_editor_size
-                    )
+                    note_editor.web.loadFinished.connect(set_editor_size)
 
                     note_layout.addWidget(editor_widget)
 
@@ -1179,6 +1228,17 @@ def setup_addon_config_dialog():
 setup_addon_config_dialog()
 
 
+def replace_nulls_with_empty_strings(data):
+    """
+    Replaces all None/null values in dictionaries (or list of dicts) with empty strings.
+    """
+    if isinstance(data, dict):
+        return {k: ("" if v is None else v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [replace_nulls_with_empty_strings(item) for item in data]
+    return data
+
+
 def on_process_json_triggered():
     """Displays the JSON input dialog and processes the input."""
 
@@ -1187,7 +1247,7 @@ def on_process_json_triggered():
             super().__init__(parent or mw)
             self._close_event_has_cleaned_up = True
             self.setWindowTitle("Process JSON Input")
-            self.resize(400, 300)
+            self.resize(800, 1000)
 
             # Layout setup
             layout = QVBoxLayout(self)
@@ -1201,22 +1261,15 @@ def on_process_json_triggered():
             layout.addWidget(self.json_input)
 
             # Deck and note type selection
-            self.notetype_combo = QWidget(self)
-            self.deck_combo = QWidget(self)
-            self.setup_choosers()
+            self.setup_note_type_and_deck_choosers()
 
-            # self.deck_combo = QComboBox(self)
-            # self.deck_combo.addItems(
-            #     [deck.name for deck in mw.col.decks.all_names_and_ids()]
-            # )
-            layout.addWidget(self.notetype_combo)
+            layout.addWidget(self.note_type_combo)
             layout.addWidget(self.deck_combo)
 
             # self.notetype_combo = QComboBox(self)
             # self.notetype_combo.addItems(
             #     [nt.name for nt in mw.col.models.all_names_and_ids()]
             # )
-
 
             # Action buttons
             buttons = QDialogButtonBox(
@@ -1237,13 +1290,15 @@ def on_process_json_triggered():
             button_row.addWidget(buttons)
             layout.addLayout(button_row)
 
+        def setup_note_type_and_deck_choosers(self) -> None:
+            self.note_type_combo = QWidget(self)
+            self.deck_combo = QWidget(self)
 
-        def setup_choosers(self) -> None:
             defaults = mw.col.defaults_for_adding(current_review_card=mw.reviewer.card)
 
             self.notetype_chooser = NotetypeChooser(
                 mw=mw,
-                widget=self.notetype_combo,
+                widget=self.note_type_combo,
                 starting_notetype_id=NotetypeId(defaults.notetype_id),
                 # on_button_activated=lambda *_: None,
                 # on_button_activated=self.show_notetype_selector,
@@ -1265,8 +1320,9 @@ def on_process_json_triggered():
                 note_type_id = self.notetype_chooser.selected_notetype_id
                 note_type = mw.col.models.get(note_type_id)
                 field_names = [f["name"] for f in note_type["flds"]]
-                template = [{field: "" for field in field_names}]
-                self.json_input.setPlainText(json.dumps(template, indent=4))
+                note_template = {field: "" for field in field_names}
+                note_template["tags"] = []
+                self.json_input.setPlainText(json.dumps([note_template], indent=4))
             except Exception as e:
                 showInfo(f"Error generating template: {e}")
 
@@ -1299,13 +1355,14 @@ def on_process_json_triggered():
         note_type_id = input_data["notetype"]
         note_type = mw.col.models.get(note_type_id)
         note_type_name = note_type["name"]
-        
 
         try:
             notes_json_data = json.loads(json_data)  # Parse the JSON input
         except json.JSONDecodeError:
             logger.error("Invalid JSON input.")
             return
+
+        notes_json_data = replace_nulls_with_empty_strings(notes_json_data)
 
         if not is_valid_cards_data(notes_json_data):
             logger.error(
@@ -1323,7 +1380,6 @@ def on_process_json_triggered():
             json_data,
         )
 
-
         # Add the new tag from config value (json_tag is guaranteed to exist)
         json_tag = config["json_tag"]
 
@@ -1333,7 +1389,7 @@ def on_process_json_triggered():
         dummy_note = Note(mw.col, note_type)
 
         confirmed_cards = gp.display_cards_confirmation_dialog(
-            {dummy_note: notes_json_data}
+            cards_data={dummy_note: notes_json_data}, global_tags=[json_tag]
         )
 
         if not confirmed_cards:
@@ -1347,7 +1403,7 @@ def on_process_json_triggered():
                 cards_data,
                 deck_id=deck_id,
                 note_type=note_type_id,
-                note_tag=json_tag,
+                note_tag=[],
             )
 
             # Add the new tag to each note
@@ -1362,7 +1418,7 @@ def on_process_json_triggered():
 
 
 # New menu action to process JSON input
-def _on_process_json_triggered(): # old version
+def _on_process_json_triggered():  # old version
     """Displays the JSON input dialog and processes the input."""
 
     # Configure logging
@@ -1609,77 +1665,147 @@ class DebugDialog(QDialog):
     def __init__(self, note, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Debug Note")
-        self.resize(800, 1200)
+        self.resize(800, 1000)
         self.note = note
 
-        # Main layout
-        main_layout = QVBoxLayout()
-        self.setLayout(main_layout)
+        layout = QVBoxLayout(self)
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
 
-        # Generate Schema Button
+        # Schema Tab
         self.schema_output = QTextEdit()
         self.schema_output.setReadOnly(True)
+        self.schema_tab = QWidget()
+        schema_layout = QVBoxLayout(self.schema_tab)
+        schema_button_layout = QHBoxLayout()
+        schema_button = QPushButton("Generate Schema")
+        schema_button.clicked.connect(self.display_schema)
+        schema_copy_button = QPushButton("Copy to Clipboard")
+        schema_copy_button.clicked.connect(lambda: self.copy_to_clipboard(self.schema_output))
+        schema_button_layout.addWidget(schema_button)
+        schema_button_layout.addWidget(schema_copy_button)
+        schema_layout.addLayout(schema_button_layout)
+        schema_layout.addWidget(self.schema_output)
+        self.tabs.addTab(self.schema_tab, "Schema")
 
-        generate_schema_button = QPushButton("Generate Schema")
-        generate_schema_button.clicked.connect(self.display_schema)
-        main_layout.addWidget(generate_schema_button)
-        main_layout.addWidget(self.schema_output)
-
-        # Generate Create Prompt Button
+        # Create Prompt Tab
         self.create_prompt_output = QTextEdit()
         self.create_prompt_output.setReadOnly(True)
+        self.create_prompt_tab = QWidget()
+        create_layout = QVBoxLayout(self.create_prompt_tab)
+        self.include_schema_create = QCheckBox("Include Schema")
+        self.include_examples_create = QCheckBox("Include Examples")
+        create_button_layout = QHBoxLayout()
+        create_button = QPushButton("Generate Create Prompt")
+        create_button.clicked.connect(self.display_create_prompt)
+        create_copy_button = QPushButton("Copy to Clipboard")
+        create_copy_button.clicked.connect(lambda: self.copy_to_clipboard(self.create_prompt_output))
+        create_button_layout.addWidget(create_button)
+        create_button_layout.addWidget(create_copy_button)
+        create_layout.addWidget(self.include_schema_create)
+        create_layout.addWidget(self.include_examples_create)
+        create_layout.addLayout(create_button_layout)
+        create_layout.addWidget(self.create_prompt_output)
+        self.tabs.addTab(self.create_prompt_tab, "Create Prompt")
 
-        generate_create_prompt_button = QPushButton("Generate Create Prompt")
-        generate_create_prompt_button.clicked.connect(self.display_create_prompt)
-        main_layout.addWidget(generate_create_prompt_button)
-        main_layout.addWidget(self.create_prompt_output)
-
-        # Generate complete Prompt Button
+        # Complete Prompt Tab
         self.complete_prompt_output = QTextEdit()
         self.complete_prompt_output.setReadOnly(True)
+        self.complete_prompt_tab = QWidget()
+        complete_layout = QVBoxLayout(self.complete_prompt_tab)
+        self.include_schema_complete = QCheckBox("Include Schema")
+        self.include_examples_complete = QCheckBox("Include Examples")
+        complete_button_layout = QHBoxLayout()
+        complete_button = QPushButton("Generate Complete Prompt")
+        complete_button.clicked.connect(self.display_complete_prompt)
+        complete_copy_button = QPushButton("Copy to Clipboard")
+        complete_copy_button.clicked.connect(lambda: self.copy_to_clipboard(self.complete_prompt_output))
+        complete_button_layout.addWidget(complete_button)
+        complete_button_layout.addWidget(complete_copy_button)
+        complete_layout.addWidget(self.include_schema_complete)
+        complete_layout.addWidget(self.include_examples_complete)
+        complete_layout.addLayout(complete_button_layout)
+        complete_layout.addWidget(self.complete_prompt_output)
+        self.tabs.addTab(self.complete_prompt_tab, "Complete Prompt")
 
-        generate_complete_prompt_button = QPushButton("Generate Complete Prompt")
-        generate_complete_prompt_button.clicked.connect(self.display_complete_prompt)
-        main_layout.addWidget(generate_complete_prompt_button)
-        main_layout.addWidget(self.complete_prompt_output)
+        # Examples Tab
+        self.examples_output = QTextEdit()
+        self.examples_output.setReadOnly(True)
+        self.examples_tab = QWidget()
+        examples_layout = QVBoxLayout(self.examples_tab)
+        control_layout = QHBoxLayout()
+
+        self.example_count = QSpinBox()
+        self.example_count.setMinimum(1)
+        self.example_count.setMaximum(100)
+        self.example_count.setValue(10)
+        self.example_count.setSuffix(" examples")
+
+        examples_button = QPushButton("Generate Examples")
+        examples_button.clicked.connect(self.display_examples)
+
+        examples_copy_button = QPushButton("Copy to Clipboard")
+        examples_copy_button.clicked.connect(lambda: self.copy_to_clipboard(self.examples_output))
+
+        control_layout.addWidget(QLabel("Count:"))
+        control_layout.addWidget(self.example_count)
+        control_layout.addWidget(examples_button)
+        control_layout.addWidget(examples_copy_button)
+        control_layout.addStretch()
+
+        examples_layout.addLayout(control_layout)
+        examples_layout.addWidget(self.examples_output)
+        self.tabs.addTab(self.examples_tab, "Examples")
 
         # Close Button
         close_button = QPushButton("Close")
         close_button.clicked.connect(self.close)
-        main_layout.addWidget(close_button)
+        layout.addWidget(close_button)
 
     def display_schema(self):
         """Generate and display the schema for the note."""
         schema = GeminiPrompts(mw=mw).generate_schema_class(self.note.note_type())
         self.schema_output.setPlainText(
-            json.dumps(
-                schema,
-                indent=2,
-                ensure_ascii=False,
-            )
+            json.dumps(schema, indent=2, ensure_ascii=False)
         )
 
     def display_create_prompt(self):
-        """Generate and display the prompt for the note."""
+        """Generate and display the create prompt for the note."""
         gp = GeminiPrompts(mw=mw)
         prompt = gp.get_create_prompt(
             self.note,
-            examples="",
-            schema="",
+            examples=None if self.include_examples_create.isChecked() else "",
+            schema=None if self.include_schema_create.isChecked() else "",
             custom_config=gp.get_effective_config_for_note(self.note),
         )
         self.create_prompt_output.setPlainText(prompt)
 
     def display_complete_prompt(self):
-        """Generate and display the prompt for the note."""
+        """Generate and display the complete prompt for the note."""
         gp = GeminiPrompts(mw=mw)
         prompt = gp.get_complete_prompt(
             self.note,
-            examples="",
-            schema="",
+            examples=None if self.include_examples_complete.isChecked() else "",
+            schema=None if self.include_schema_complete.isChecked() else "",
             custom_config=gp.get_effective_config_for_note(self.note),
         )
         self.complete_prompt_output.setPlainText(prompt)
+
+    def display_examples(self):
+        """Generate and display example notes."""
+        n = self.example_count.value()
+        gp = GeminiPrompts(mw=mw)
+        note_type = self.note.note_type()
+        try:
+            examples_json = gp.example_notes(note_type, n=n)
+            self.examples_output.setPlainText(examples_json)
+        except Exception as e:
+            self.examples_output.setPlainText(f"Error generating examples: {e}")
+
+    def copy_to_clipboard(self, text_edit: QTextEdit):
+        """Copy the content of the given QTextEdit to the clipboard."""
+        clipboard = QApplication.clipboard()
+        clipboard.setText(text_edit.toPlainText())
 
 
 def add_debug_menu_action(browser):
@@ -1710,6 +1836,175 @@ def add_debug_menu_action(browser):
 
 # Hook to add the action when the browser is initialized
 gui_hooks.browser_menus_did_init.append(add_debug_menu_action)
+
+def on_browser_context_menu(browser, menu):
+    selected_notes = browser.selected_notes()
+    if not selected_notes:
+        return
+
+    col = browser.mw.col
+    notes = [col.get_note(nid) for nid in selected_notes]
+    note_types = {note.mid for note in notes}
+
+    # Only add the debug option if all notes have the same notetype
+    if len(note_types) == 1:
+        note = notes[0]  # Use the first note for the debug dialog
+        action = QAction("Debug Note", browser)
+        action.triggered.connect(lambda: DebugDialog(note, parent=browser).exec())
+        menu.addAction(action)
+    else:
+        logger.debug("Selected notes have different notetypes; not showing Debug Note.")
+
+gui_hooks.browser_will_show_context_menu.append(on_browser_context_menu)
+
+class PromptFromTextDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent or mw)
+        self.setWindowTitle("Create Cards from Prompt Text")
+        self.resize(1000, 800)
+        self.layout = QVBoxLayout(self)
+
+        self.gp = GeminiPrompts(mw=mw, manual_execution=True)
+
+        self.setup_note_type_and_deck_choosers()
+
+        self.prompt_input = QTextEdit()
+        self.prompt_input.setPlaceholderText("Enter a list of words or a sentence...")
+        self.layout.addWidget(QLabel("Prompt Text:"))
+        self.layout.addWidget(self.prompt_input)
+
+        self.generate_button = QPushButton("Generate Prompt")
+        self.generate_button.clicked.connect(self.generate_prompt)
+        self.layout.addWidget(self.generate_button)
+
+        self.prompt_edit = QTextEdit()
+        self.prompt_edit.setPlaceholderText("Prompt preview will appear here...")
+        self.layout.addWidget(QLabel("Edit Prompt:"))
+        self.layout.addWidget(self.prompt_edit)
+
+        self.submit_button = QPushButton("Send to Gemini")
+        self.submit_button.clicked.connect(self.send_prompt)
+        self.layout.addWidget(self.submit_button)
+
+        self.global_tag_edit = TagEdit(self)
+        self.global_tag_edit.setCol(mw.col)
+        self.global_tag_edit.setToolTip("Tags to apply to all generated notes")
+        # self.layout.addWidget(QLabel("Global Tags:"))
+        self.layout.addWidget(self.global_tag_edit)
+
+        if note_tag := config.get("note_tag"):
+            self.global_tag_edit.setText(note_tag)
+
+        self.status = QLabel("")
+        self.layout.addWidget(self.status)
+
+    def setup_note_type_and_deck_choosers(self) -> None:
+        self.note_type_combo = QWidget(self)
+        self.deck_combo = QWidget(self)
+
+        defaults = mw.col.defaults_for_adding(current_review_card=mw.reviewer.card)
+
+        self.note_type_chooser = NotetypeChooser(
+            mw=mw,
+            widget=self.note_type_combo,
+            starting_notetype_id=NotetypeId(defaults.notetype_id),
+            # on_button_activated=lambda *_: None,
+            # on_button_activated=self.show_notetype_selector,
+            on_notetype_changed=lambda *_: None,
+            # on_notetype_changed=self.on_notetype_change,
+        )
+
+        self.deck_chooser = DeckChooser(
+            mw=mw,
+            widget=self.deck_combo,
+            starting_deck_id=DeckId(defaults.deck_id),
+            on_deck_changed=lambda *_: None,
+            # on_deck_changed=self.on_deck_changed,
+        )
+
+        self.layout.addWidget(self.note_type_combo)
+        self.layout.addWidget(self.deck_combo)
+
+    def generate_prompt(self):
+        note_type_id = self.note_type_chooser.selected_notetype_id
+        note_type = mw.col.models.get(note_type_id)
+        dummy_note = Note(mw.col, note_type)
+        dummy_note.fields[0] = self.prompt_input.toPlainText()
+        dummy_note.tags = [config.get("prompt_tag", "prompt")]
+
+        try:
+            prompt = self.gp.get_create_prompt(dummy_note)
+            self.prompt_edit.setPlainText(prompt)
+            self.status.setText("Prompt generated.")
+        except Exception as e:
+            self.status.setText(f"Error: {e}")
+            logger.exception("Failed to generate prompt")
+
+    def send_prompt(self):
+        prompt = self.prompt_edit.toPlainText()
+        if not prompt.strip():
+            self.status.setText("Prompt is empty.")
+            return
+
+        self.status.setText("Configuring GEMINI api ...")
+        try:
+            configure_generative_ai()
+        except RuntimeError as e:
+            self.status.setText("Failed to configure GEMINI api.")
+            return
+
+        try:
+            self.status.setText("Waiting for response ...")
+            response = self.gp.send_prompt_to_generative_ai(prompt)
+            if not response or not response.text:
+                self.status.setText("No response received.")
+                return
+            self.status.setText("Response received. Validating...")
+        except Exception as e:
+            self.status.setText(f"Error from Gemini: {e}")
+            logger.exception("Gemini returned an error")
+            return
+
+        try:
+            cards_data = json.loads(response.text)
+        except json.JSONDecodeError as e:
+            logger.error("Error decoding json response: %s\n\n%s", e, response.text)
+            self.status.setText("Error decoding json response.")
+            return
+
+        if not is_valid_cards_data(cards_data):
+            self.status.setText("Gemini response is not a valid card list.")
+            return
+
+        dummy_note = Note(mw.col, mw.col.models.get(self.note_type_chooser.selected_notetype_id))
+
+        global_tags = mw.col.tags.split(self.global_tag_edit.text())
+        confirmed = self.gp.display_cards_confirmation_dialog(
+            cards_data={dummy_note: cards_data},
+            global_tags=global_tags,
+        )
+
+        if not confirmed:
+            self.status.setText("No cards confirmed.")
+            return
+
+        for note, cards in confirmed.items():
+            self.gp.add_new_notes(
+                original_note=note,
+                cards_data=cards,
+                deck_id=self.deck_chooser.selected_deck_id,
+                note_type=note.model(),
+                note_tag=[],
+            )
+        self.status.setText("Cards added successfully.")
+
+def open_prompt_text_dialog():
+    dialog = PromptFromTextDialog()
+    dialog.exec()
+
+action = QAction("Create Cards from Prompt Text", mw)
+action.triggered.connect(open_prompt_text_dialog)
+mw.form.menuTools.addAction(action)
 
 
 class ConfigDialog(QDialog):
@@ -2040,6 +2335,7 @@ class ConfigDialog(QDialog):
         return "# Configuration Documentation\nDocumentation not found."
 
 
+
 class CustomConfigDialog(ConfigDialog):
     excluded_keys = {
         "api_key",
@@ -2305,3 +2601,5 @@ class CustomConfigDialog(ConfigDialog):
 
         # Close the dialog
         self.accept()
+
+
