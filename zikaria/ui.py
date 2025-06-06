@@ -39,7 +39,7 @@ from anki.notes import Note
 from anki.models import NoteType, NotetypeId # Added NotetypeId
 from anki.decks import DeckId # Added DeckId
 from aqt.operations.note import add_note
-from proto.message import copy as proto_copy # Renamed to avoid conflict
+from copy import deepcopy
 
 # Imports from other modules in this addon
 from .config_utils import get_config, get_logger, get_config_value, get_addon_name
@@ -500,7 +500,9 @@ class PromptFromTextDialog(QDialog):
         self.layout.addWidget(self.generate_prompt_button)
 
         self.prompt_edit_area = QTextEdit() # For the full generated prompt
-        # ... (rest of UI elements)
+        self.prompt_edit_area.setPlaceholderText("Prompt preview will appear here...")
+        self.layout.addWidget(QLabel("Edit Prompt:"))
+        self.layout.addWidget(self.prompt_edit_area)
 
         self.submit_ai_button = QPushButton("Send to AI")
         self.submit_ai_button.clicked.connect(self.send_prompt_to_ai_handler)
@@ -658,7 +660,7 @@ class ConfigDialog(QDialog):
             self.logger.warning("ConfigDialog initialized without addon_name_param, using get_addon_name().")
 
         current_addon_config_obj = get_config() # Get the live config object
-        self.config_to_edit = proto_copy.deepcopy(current_addon_config_obj) # Edit a deep copy
+        self.config_to_edit = deepcopy(current_addon_config_obj) # Edit a deep copy
 
         self.setWindowTitle(f"Zikaria Addon Configuration ({self.addon_name})")
         # ... (rest of ConfigDialog UI setup as before, using self.mw_instance, self.logger, self.addon_name)
@@ -694,6 +696,7 @@ class ConfigDialog(QDialog):
 
     def _init_form_elements(self): # Renamed
         default_config_keys = {}
+
         if self.mw_instance.addonManager:
             default_config_keys = self.mw_instance.addonManager.addonConfigDefaults(self.addon_name) or {}
 
@@ -706,7 +709,7 @@ class ConfigDialog(QDialog):
             
             widget_data = self._create_config_widget_ui(key, current_value) # Renamed
             if widget_data:
-                self.form_layout.addRow(widget_data["label_widget"], widget_data["editor_widget"])
+                self.form_layout.addRow(widget_data["label"], widget_data["widget"])
                 self.config_widgets_map[key] = widget_data # Use renamed map
                 handled_keys.add(key)
         
@@ -715,41 +718,204 @@ class ConfigDialog(QDialog):
         self._add_action_buttons() # Renamed
 
     def _create_config_widget_ui(self, name: str, value: Any) -> Optional[Dict[str, Any]]: # Renamed
-        # ... (Same logic as _create_config_widget from previous turns, ensure it's complete)
-        # This is a critical part for building the form. For brevity, not repeating full code.
-        # Make sure it returns: {'label_widget': QLabel, 'editor_widget': QWidget, 'get_fn': callable, 'change_event': signal_or_None}
-        # Example for boolean:
-        if isinstance(value, bool):
-            editor = QCheckBox()
-            editor.setChecked(value)
-            return {"label_widget": QLabel(name.replace('_', ' ').title() + ":"), "editor_widget": editor, "get_fn": editor.isChecked, "change_event": None}
-        # ... other types
         self.logger.warning(f"ConfigDialog: Widget creation not fully implemented in this snippet for type {type(value)} (key: {name}).")
-        return None
+        """Create and add a widget for the given config key."""
+        change_event = None
+        if isinstance(value, bool):
+            widget = QCheckBox()
+            widget.setChecked(value)
+            label = f"{name.replace('_', ' ').title()}:"
+            get_fn = widget.isChecked
+        elif isinstance(value, int):
+            widget = QSpinBox()
+            widget.setRange(0, 10000)
+            widget.setValue(value)
+            label = f"{name.replace('_', ' ').title()}:"
+            get_fn = widget.value
+            change_event = widget.textChanged
+        elif isinstance(value, float):
+            widget = QDoubleSpinBox()
+            widget.setRange(0.0, 100.0)
+            widget.setValue(value)
+            label = f"{name.replace('_', ' ').title()}:"
+            get_fn = widget.value
+            change_event = widget.textChanged
+        elif isinstance(value, list):
+            widget = QLineEdit(", ".join(map(str, value)))
+            change_event = widget.textChanged
+            label = f"{name.replace('_', ' ').title()} (comma-separated):"
+            get_fn = lambda: [item.strip() for item in widget.text().split(",")]
+        elif isinstance(value, dict):
+            widget = QTextEdit(
+                json.dumps(
+                    value,
+                    indent=4,
+                    ensure_ascii=False,
+                )
+            )
+            change_event = widget.textChanged
+            label = f"{name.replace('_', ' ').title()} (JSON):"
 
+            def get_fn():
+                success, data = self._load_json_dict(widget.toPlainText())
+                if success:
+                    return data
+
+        elif isinstance(value, str):
+            if "\n" in value or len(value) > 80:
+                widget = QTextEdit(value)
+                get_fn = widget.toPlainText
+            else:
+                widget = QLineEdit(value)
+                get_fn = widget.text
+            change_event = widget.textChanged
+            label = f"{name.replace('_', ' ').title()}:"
+        else:
+            return
+
+        return {
+            "widget": widget,
+            "label": label,
+            "row": widget,
+            "get_fn": get_fn,
+            "change_event": change_event,
+        }
 
     def _add_remaining_config_ui_elements(self, handled_keys_set: set): # Renamed
         self.logger.debug("Adding remaining config UI (placeholder).")
+        
+        self.extra_config_edit = QTextEdit()
+        self.form_layout.addRow(
+            QLabel("Other Configuration Values (JSON):"), self.extra_config_edit
+        )
+        remaining_config = {
+            k: v for k, v in self.config_to_edit.items() if k not in handled_keys_set
+        }
+        if remaining_config:
+            self.extra_config_data_map = remaining_config
+            self.extra_config_edit.setPlainText(
+                json.dumps(
+                    remaining_config,
+                    indent=4,
+                    ensure_ascii=False,
+                )
+            )
 
     def _add_custom_config_ui_section(self): # Renamed
-        self.custom_configs_main_label = QLabel("Custom Configurations:") # Renamed attribute
-        self.form_layout.addRow(self.custom_configs_main_label)
-        # ... More UI for custom_config list, add/edit/delete buttons ...
-        # Needs CustomConfigDialog integration.
-        # self._update_custom_configs_display() # To render initial list
+        """Add the UI for managing custom configurations."""
+        self.custom_configs_label = QLabel("Custom Configurations:")
+        self.form_layout.addRow(self.custom_configs_label)
+
+        self.custom_configs_list = QScrollArea()
+        self.custom_configs_list.setWidgetResizable(True)
+
+        self.custom_configs_content = QWidget()
+
+        self.custom_configs_content_layout = QVBoxLayout()
+        # self.custom_configs_content_layout.setContentsMargins(0, 0, 0, 0)
+        self.custom_configs_content.setLayout(self.custom_configs_content_layout)
+
+        self.custom_configs_content_grid = QWidget()
+
+        self.custom_configs_content_grid_layout = QGridLayout()
+        self.custom_configs_content_grid_layout.setContentsMargins(0, 0, 0, 0)
+        self.custom_configs_content_grid.setLayout(
+            self.custom_configs_content_grid_layout
+        )
+
+        self.custom_configs_content_layout.addWidget(self.custom_configs_content_grid)
+        self.custom_configs_content_layout.addStretch()
+
+        self.custom_configs_list.setWidget(self.custom_configs_content)
+
+        self.form_layout.addRow(self.custom_configs_list)
+        self.update_custom_configs_ui()
+
+        add_custom_config_button = QPushButton("Add Custom Config")
+        add_custom_config_button.clicked.connect(
+            lambda _: self.add_or_edit_custom_config()
+        )
+        self.form_layout.addRow(add_custom_config_button)
 
     def _update_custom_configs_display(self): # Renamed
-        self.logger.debug("Updating custom configs display (placeholder).")
+        """Refresh the display of custom configurations."""
 
-    def _add_or_edit_custom_config_entry(self, index: Optional[int] = None): # Renamed
+        self.logger.debug("Updating custom configs display (placeholder).")
+        while self.custom_configs_content_grid_layout.count():
+            child = self.custom_configs_content_grid_layout.takeAt(0)
+            if widget := child.widget():
+                widget.deleteLater()
+
+        note_label = QLabel("Note Type")
+        note_label.setStyleSheet("font-weight: bold;")
+
+        deck_label = QLabel("Deck")
+        deck_label.setStyleSheet("font-weight: bold;")
+
+        for column, widget in enumerate([note_label, deck_label]):
+            self.custom_configs_content_grid_layout.addWidget(widget, 0, column, 1, 1)
+
+        for idx, custom_config in enumerate(self.config.get("custom_config", [])):
+            note_type_id, deck_id, _ = custom_config
+            note_type_name = mw.col.models.get(note_type_id)["name"]
+            deck_name = mw.col.decks.get(deck_id)["name"]
+
+            note_type_label = QLabel(note_type_name)
+            deck_label = QLabel(deck_name)
+
+            edit_button = QPushButton("Edit")
+            edit_button.clicked.connect(
+                lambda _, i=idx: self.add_or_edit_custom_config(i)
+            )
+
+            delete_button = QPushButton("Delete")
+            delete_button.clicked.connect(lambda _, i=idx: self.delete_custom_config(i))
+
+            # entry_layout = QHBoxLayout()
+            # entry_layout.addWidget(entry_label)
+            # entry_layout.addWidget(edit_button)
+            # entry_layout.addWidget(delete_button)
+            #
+            # entry_widget = QWidget()
+            # entry_widget.setLayout(entry_layout)
+
+            for column, widget in enumerate(
+                [note_type_label, deck_label, edit_button, delete_button]
+            ):
+                self.custom_configs_content_grid_layout.addWidget(
+                    widget, idx + 1, column, 1, 1
+                )
+
+    def _add_or_edit_custom_config_entry(self, index: int | None = None): # Renamed
         self.logger.debug(f"Add/Edit custom config entry: index {index} (placeholder).")
+
         # This would create and exec a CustomConfigDialog instance.
         # custom_settings = self.config_to_edit.get("custom_config", [])[index] if index is not None else {}
         # dialog = CustomConfigDialog(self, ..., current_mw_ref=self.mw_instance, addon_name_param=self.addon_name)
         # if dialog.exec... update self.config_to_edit and self._update_custom_configs_display()
 
+        if index is None:
+            logger.debug("Adding new custom config.")
+            note_type_id, deck_id, custom_settings = None, None, {}
+        else:
+            logger.debug("Editing existing custom config.")
+            note_type_id, deck_id, custom_settings = self.config["custom_config"][index]
+
+        dialog = CustomConfigDialog(self, note_type_id, deck_id, custom_settings)
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            updated_entry = [dialog.note_type, dialog.deck, dialog.config]
+            if index is None:
+                self.config.setdefault("custom_config", []).append(updated_entry)
+            else:
+                self.config["custom_config"][index] = updated_entry
+            self._update_custom_configs_display()
+
+
     def _delete_custom_config_entry(self, index: int): # Renamed
-        self.logger.debug(f"Delete custom config entry: index {index} (placeholder).")
+        """Delete a custom configuration."""
+        self.config["custom_config"].pop(index)
+        self.update_custom_configs_ui()
 
     def _add_action_buttons(self): # Renamed
         button_layout = QHBoxLayout()
@@ -814,7 +980,7 @@ class CustomConfigDialog(ConfigDialog): # Inherits from ConfigDialog
 
 
 # --- show_config_dialog_action ---
-def show_config_dialog_action(current_mw_ref: QMainWindow, addon_name_str: str):
+def show_config_dialog_action(current_mw_ref: QMainWindow, addon_name_str: str = None):
     logger = get_logger()
     logger.debug(f"Showing config dialog for addon: {addon_name_str}")
     dialog = ConfigDialog(current_mw_ref=current_mw_ref, addon_name_param=addon_name_str)

@@ -41,7 +41,7 @@ def generate_schema_class(note_type: NoteType) -> dict:
                 unique_values = set()
                 for nid in note_ids:
                     note = col.get_note(nid)
-                    if note and (value := note.get(name)): # Ensure note exists and field has value
+                    if note and (value := note[name]): # Ensure note exists and field has value
                         unique_values.add(value)
                 
                 if unique_values:

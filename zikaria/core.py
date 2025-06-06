@@ -177,7 +177,7 @@ class ZikariaPrompts:
         return get_effective_config(note_type_id, deck_id)
 
 
-    def _process_prompt_note_with_generative_ai(self, note: Note) -> Optional[List[dict]]: # Renamed
+    def _process_prompt_note_with_generative_ai(self, note: Note) -> list[dict] | None: # Renamed
         effective_conf = self._get_effective_config_for_note(note)
         prompt_str = get_create_prompt(note, effective_conf) # from prompts.py
         if not prompt_str:
@@ -208,7 +208,7 @@ class ZikariaPrompts:
         return cards_data_list
 
 
-    def _process_complete_note_with_generative_ai(self, note: Note) -> Optional[dict]: # Renamed
+    def _process_complete_note_with_generative_ai(self, note: Note) -> dict | None: # Renamed
         effective_conf = self._get_effective_config_for_note(note)
         prompt_str = get_complete_prompt(note, effective_conf) # from prompts.py
         if not prompt_str:
@@ -320,10 +320,10 @@ class ZikariaPrompts:
     def add_new_notes(
         self,
         original_note: Note, 
-        cards_data_list: List[dict],
-        deck_id_override: Optional[int] = None,
-        note_type_override: Optional[dict] = None, 
-        default_tags: Optional[List[str]] = None,
+        cards_data_list: list[dict],
+        deck_id_override: int | None = None,
+        note_type_override: dict | None = None, 
+        default_tags: list[str] | None = None,
     ):
         col = self.mw.col
         

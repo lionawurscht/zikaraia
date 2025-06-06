@@ -130,7 +130,7 @@ def ensure_tags_exist():
     existing_tags_in_anki = set(col.tags.all())
     
     # defaults_for_adding() does not take arguments in modern Anki versions
-    defaults = col.defaults_for_adding() 
+    defaults = col.defaults_for_adding(current_review_card=None) 
     
     default_model_id = defaults.notetype_id
     if default_model_id is None: # Fallback if no default notetype is set
