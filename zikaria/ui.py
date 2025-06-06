@@ -245,22 +245,133 @@ def display_cards_confirmation_dialog(
         return dialog.get_confirmed_cards_data() # Use renamed method
     return {}
 
-# --- display_review_and_edit_notes_dialog (Simplified for brevity, assume similar changes) ---
+# --- ReviewAndEditNotesDialog ---
+class ReviewAndEditNotesDialog(QDialog):
+    def __init__(self, notes_data_list: List[NoteData], current_mw_ref: QMainWindow, parent: Optional[QWidget] = None):
+        super().__init__(parent or current_mw_ref)
+        self.notes_data_list = notes_data_list
+        self.mw_instance = current_mw_ref
+        self.logger = get_logger()
+        self.edited_notes_data: List[NoteData] = []
+        self._setup_ui()
+
+    def _setup_ui(self):
+        self.setWindowTitle("Review and Edit Notes (Zikaria)")
+        self.resize(1000, 700) # Adjusted size
+
+        self.main_layout = QVBoxLayout(self)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_content_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_content_widget)
+
+        self.note_editors = [] # List to store (checkbox, field_widgets_map, tag_edit_widget, original_note_data)
+
+        for idx, note_data in enumerate(self.notes_data_list):
+            note_frame = QFrame()
+            note_frame.setFrameShape(QFrame.Shape.StyledPanel) # Add some visual separation
+            note_layout = QVBoxLayout(note_frame)
+
+            # Header for the note (e.g., Note 1, Note Type, Deck)
+            header_label_text = f"Note {idx + 1}"
+            if note_data.note_type_id:
+                nt_model = self.mw_instance.col.models.get(NotetypeId(note_data.note_type_id))
+                if nt_model:
+                    header_label_text += f" (Type: {nt_model['name']})"
+            if note_data.deck_id:
+                dk_model = self.mw_instance.col.decks.get(DeckId(note_data.deck_id))
+                if dk_model:
+                    header_label_text += f" [Deck: {dk_model['name']}]"
+
+            header_label = QLabel(header_label_text)
+            header_label.setStyleSheet("font-weight: bold;")
+            note_layout.addWidget(header_label)
+
+            checkbox = QCheckBox("Include this note")
+            checkbox.setChecked(True)
+            note_layout.addWidget(checkbox)
+
+            fields_group_box = QWidget() # Using a QWidget as a container
+            fields_layout = QFormLayout(fields_group_box)
+            field_widgets = {}
+
+            for field_name, field_value in note_data.fields.items():
+                field_label = QLabel(f"{field_name}:")
+                field_edit = QLineEdit(str(field_value) if field_value is not None else "")
+                fields_layout.addRow(field_label, field_edit)
+                field_widgets[field_name] = field_edit
+            note_layout.addWidget(fields_group_box)
+
+            tags_label = QLabel("Tags:")
+            tag_edit_widget = TagEdit(self) # Parent is the dialog
+            if tag_edit_widget.col != self.mw_instance.col: # Important for correct tag handling
+                tag_edit_widget.setCol(self.mw_instance.col)
+            tag_edit_widget.setText(self.mw_instance.col.tags.join(note_data.tags or []))
+
+            tags_layout = QHBoxLayout()
+            tags_layout.addWidget(tags_label)
+            tags_layout.addWidget(tag_edit_widget)
+            note_layout.addLayout(tags_layout)
+
+            scroll_layout.addWidget(note_frame)
+            self.note_editors.append((checkbox, field_widgets, tag_edit_widget, note_data))
+
+        scroll_area.setWidget(scroll_content_widget)
+        self.main_layout.addWidget(scroll_area)
+
+        # Dialog buttons
+        self.button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.button_box.accepted.connect(self.on_accept)
+        self.button_box.rejected.connect(self.reject) # QDialog's reject
+        self.main_layout.addWidget(self.button_box)
+
+    def on_accept(self):
+        self.logger.debug("ReviewAndEditNotesDialog: on_accept called.")
+        self.edited_notes_data = [] # Clear previous attempts if any
+        for checkbox, field_widgets_map, tag_edit_widget, original_note_data in self.note_editors:
+            if checkbox.isChecked():
+                updated_fields = {name: qlineedit.text() for name, qlineedit in field_widgets_map.items()}
+                updated_tags = self.mw_instance.col.tags.split(tag_edit_widget.text())
+
+                # Create new NoteData, preserving original note_type_id and deck_id
+                # as this dialog is for content review, not structural changes.
+                new_note_data_entry = NoteData(
+                    note_type_id=original_note_data.note_type_id,
+                    deck_id=original_note_data.deck_id,
+                    fields=updated_fields,
+                    tags=updated_tags
+                )
+                self.edited_notes_data.append(new_note_data_entry)
+
+        self.logger.info(f"Accepted review. {len(self.edited_notes_data)} notes will be processed.")
+        self.accept() # This is QDialog.accept() which closes the dialog with Accepted code
+
+# --- display_review_and_edit_notes_dialog ---
 def display_review_and_edit_notes_dialog(
-    notes_data_list: List[NoteData], 
-    current_mw_ref: Optional[QMainWindow] = None, 
+    notes_data_list: List[NoteData],
+    current_mw_ref: Optional[QMainWindow] = None,
     parent_widget_ref: Optional[QWidget] = None
-) -> Optional[bool]:
-    current_mw_ref = current_mw_ref or mw
+) -> List[NoteData]: # Return type changed to List[NoteData]
+    effective_mw_ref = current_mw_ref or mw
     logger = get_logger()
-    # ... (Full implementation using current_mw_ref and logger from get_logger()) ...
-    # This dialog is complex, ensure all mw calls use current_mw_ref.
-    # For now, returning a placeholder to keep the structure.
-    logger.info("display_review_and_edit_notes_dialog called (implementation condensed).")
-    # Placeholder:
-    # dialog = ReviewAndEditNotesDialog(mw_ref=current_mw_ref, notes_list=notes_data_list, parent_ref=parent_widget_ref)
-    # return dialog.exec() == QDialog.DialogCode.Accepted
-    return True # Placeholder
+
+    if not notes_data_list:
+        logger.info("display_review_and_edit_notes_dialog: No notes data provided to review.")
+        return []
+
+    dialog = ReviewAndEditNotesDialog(
+        notes_data_list=notes_data_list,
+        current_mw_ref=effective_mw_ref,
+        parent=parent_widget_ref
+    )
+
+    if dialog.exec() == QDialog.DialogCode.Accepted:
+        logger.debug("ReviewAndEditNotesDialog accepted. Returning edited notes.")
+        return dialog.edited_notes_data
+    else:
+        logger.debug("ReviewAndEditNotesDialog cancelled or closed without accepting.")
+        return [] # Return empty list if cancelled
 
 # --- JsonInputDialog ---
 class JsonInputDialog(QDialog):
@@ -437,38 +548,112 @@ class DebugDialog(QDialog):
         self.schema_output_area.setReadOnly(True)
         schema_tab_widget = QWidget()
         schema_layout = QVBoxLayout(schema_tab_widget)
-        # ... (buttons and layout as before)
+        # Add a button to refresh schema, useful if something changes
+        schema_refresh_button = QPushButton("Refresh Schema")
+        schema_refresh_button.clicked.connect(self.display_schema_handler)
+        schema_layout.addWidget(schema_refresh_button)
+        schema_layout.addWidget(self.schema_output_area)
         self.tabs.addTab(schema_tab_widget, "Schema")
-        # Connect button: schema_button.clicked.connect(self.display_schema_handler)
 
         # Create Prompt Tab
         self.create_prompt_output_area = QTextEdit()
-        # ... (as before)
-        self.tabs.addTab(QWidget(), "Create Prompt") # Placeholder
+        self.create_prompt_output_area.setReadOnly(True)
+        create_prompt_tab_widget = QWidget()
+        create_prompt_layout = QVBoxLayout(create_prompt_tab_widget)
+        # Add a button to refresh, useful if something changes
+        create_refresh_button = QPushButton("Refresh Create Prompt")
+        create_refresh_button.clicked.connect(self.display_create_prompt_handler)
+        create_prompt_layout.addWidget(create_refresh_button)
+        create_prompt_layout.addWidget(self.create_prompt_output_area)
+        self.tabs.addTab(create_prompt_tab_widget, "Create Prompt")
 
         # Complete Prompt Tab
         self.complete_prompt_output_area = QTextEdit()
-        # ... (as before)
-        self.tabs.addTab(QWidget(), "Complete Prompt") # Placeholder
+        self.complete_prompt_output_area.setReadOnly(True)
+        complete_prompt_tab_widget = QWidget()
+        complete_prompt_layout = QVBoxLayout(complete_prompt_tab_widget)
+        # Add a button to refresh, useful if something changes
+        complete_refresh_button = QPushButton("Refresh Complete Prompt")
+        complete_refresh_button.clicked.connect(self.display_complete_prompt_handler)
+        complete_prompt_layout.addWidget(complete_refresh_button)
+        complete_prompt_layout.addWidget(self.complete_prompt_output_area)
+        self.tabs.addTab(complete_prompt_tab_widget, "Complete Prompt")
         
         # Examples Tab
         self.examples_output_area = QTextEdit()
-        # ... (as before)
-        self.tabs.addTab(QWidget(), "Examples") # Placeholder
+        self.examples_output_area.setReadOnly(True)
+        examples_tab_widget = QWidget()
+        examples_layout = QVBoxLayout(examples_tab_widget)
+        # Add a button to refresh, useful if something changes
+        examples_refresh_button = QPushButton("Refresh Examples")
+        examples_refresh_button.clicked.connect(self.display_examples_handler)
+        examples_layout.addWidget(examples_refresh_button)
+        examples_layout.addWidget(self.examples_output_area)
+        self.tabs.addTab(examples_tab_widget, "Examples")
+
+        # Initial population of the tabs
+        self.display_schema_handler()
+        self.display_create_prompt_handler()
+        self.display_complete_prompt_handler()
+        self.display_examples_handler()
 
         close_button = QPushButton("Close")
         close_button.clicked.connect(self.close)
         layout.addWidget(close_button)
 
     def display_schema_handler(self):
+        self.logger.debug("DebugDialog: Displaying schema.")
         note_model = self.note.note_type()
         if not note_model:
-            self.schema_output_area.setPlainText("Error: Note has no model.")
+            self.schema_output_area.setPlainText("Error: Note has no model (note type).")
+            self.logger.error("DebugDialog: Note has no model (note type).")
             return
-        schema = generate_schema_class(note_model) 
-        self.schema_output_area.setPlainText(json.dumps(schema, indent=2, ensure_ascii=False))
+        try:
+            schema = generate_schema_class(note_model)
+            self.schema_output_area.setPlainText(json.dumps(schema, indent=2, ensure_ascii=False))
+        except Exception as e:
+            self.schema_output_area.setPlainText(f"Error generating schema: {e}")
+            self.logger.exception("DebugDialog: Error generating schema.")
 
-    # ... (other handlers for DebugDialog)
+    def display_create_prompt_handler(self):
+        self.logger.debug("DebugDialog: Displaying create prompt.")
+        try:
+            prompt = get_create_prompt(self.note, self.effective_config)
+            self.create_prompt_output_area.setPlainText(prompt)
+        except Exception as e:
+            self.create_prompt_output_area.setPlainText(f"Error generating create prompt: {e}")
+            self.logger.exception("DebugDialog: Error generating create prompt.")
+
+    def display_complete_prompt_handler(self):
+        self.logger.debug("DebugDialog: Displaying complete prompt.")
+        try:
+            prompt = get_complete_prompt(self.note, self.effective_config)
+            self.complete_prompt_output_area.setPlainText(prompt)
+        except Exception as e:
+            self.complete_prompt_output_area.setPlainText(f"Error generating complete prompt: {e}")
+            self.logger.exception("DebugDialog: Error generating complete prompt.")
+
+    def display_examples_handler(self):
+        self.logger.debug("DebugDialog: Displaying examples.")
+        try:
+            note_type = self.note.note_type()
+            if not note_type:
+                self.examples_output_area.setPlainText("Error: Note has no model (note type) to generate examples from.")
+                self.logger.error("DebugDialog: Note has no model (note type) for examples.")
+                return
+
+            # Ensure effective_config is a dict, as expected by example_notes
+            config_for_examples = self.effective_config if isinstance(self.effective_config, dict) else {}
+            if not isinstance(self.effective_config, dict):
+                 self.logger.warning(f"DebugDialog: effective_config was not a dict ({type(self.effective_config)}), using empty dict for example_notes.")
+
+            example_count = config_for_examples.get("example_notes_count", 3) # Default to 3 for debug dialog
+
+            examples_str = example_notes(note_type, n=example_count)
+            self.examples_output_area.setPlainText(examples_str)
+        except Exception as e:
+            self.examples_output_area.setPlainText(f"Error generating examples: {e}")
+            self.logger.exception("DebugDialog: Error generating examples.")
 
 # --- PromptFromTextDialog ---
 class PromptFromTextDialog(QDialog):
@@ -782,7 +967,7 @@ class ConfigDialog(QDialog):
         }
 
     def _add_remaining_config_ui_elements(self, handled_keys_set: set): # Renamed
-        self.logger.debug("Adding remaining config UI (placeholder).")
+        self.logger.debug("ConfigDialog: Adding UI for remaining configuration values (those not explicitly handled).")
         
         self.extra_config_edit = QTextEdit()
         self.form_layout.addRow(
@@ -829,93 +1014,143 @@ class ConfigDialog(QDialog):
         self.custom_configs_list.setWidget(self.custom_configs_content)
 
         self.form_layout.addRow(self.custom_configs_list)
-        self.update_custom_configs_ui()
+        self._update_custom_configs_display() # Changed from update_custom_configs_ui
 
         add_custom_config_button = QPushButton("Add Custom Config")
         add_custom_config_button.clicked.connect(
-            lambda _: self.add_or_edit_custom_config()
+            lambda: self._add_or_edit_custom_config_entry() # Corrected method name
         )
         self.form_layout.addRow(add_custom_config_button)
 
     def _update_custom_configs_display(self): # Renamed
         """Refresh the display of custom configurations."""
+        self.logger.debug("ConfigDialog: Updating custom configs display.")
 
-        self.logger.debug("Updating custom configs display (placeholder).")
+        # Clear existing widgets in the grid
         while self.custom_configs_content_grid_layout.count():
             child = self.custom_configs_content_grid_layout.takeAt(0)
-            if widget := child.widget():
-                widget.deleteLater()
+            if child and child.widget():
+                child.widget().deleteLater()
 
-        note_label = QLabel("Note Type")
-        note_label.setStyleSheet("font-weight: bold;")
+        header_note_label = QLabel("Note Type")
+        header_note_label.setStyleSheet("font-weight: bold;")
+        header_deck_label = QLabel("Deck")
+        header_deck_label.setStyleSheet("font-weight: bold;")
+        header_actions_label = QLabel("Actions")
+        header_actions_label.setStyleSheet("font-weight: bold;")
 
-        deck_label = QLabel("Deck")
-        deck_label.setStyleSheet("font-weight: bold;")
+        self.custom_configs_content_grid_layout.addWidget(header_note_label, 0, 0)
+        self.custom_configs_content_grid_layout.addWidget(header_deck_label, 0, 1)
+        self.custom_configs_content_grid_layout.addWidget(header_actions_label, 0, 2, 1, 2) # Span 2 columns for buttons
 
-        for column, widget in enumerate([note_label, deck_label]):
-            self.custom_configs_content_grid_layout.addWidget(widget, 0, column, 1, 1)
+        custom_configs_list = self.config_to_edit.get("custom_config", [])
+        self.logger.debug(f"Found {len(custom_configs_list)} custom configs to display.")
 
-        for idx, custom_config in enumerate(self.config.get("custom_config", [])):
-            note_type_id, deck_id, _ = custom_config
-            note_type_name = mw.col.models.get(note_type_id)["name"]
-            deck_name = mw.col.decks.get(deck_id)["name"]
+        for idx, custom_config_entry in enumerate(custom_configs_list):
+            note_type_id, deck_id, settings = custom_config_entry # settings is a dict
 
-            note_type_label = QLabel(note_type_name)
-            deck_label = QLabel(deck_name)
+            note_type_name = "Any Note Type"
+            if note_type_id:
+                nt = self.mw_instance.col.models.get(NotetypeId(note_type_id))
+                if nt:
+                    note_type_name = nt["name"]
+                else:
+                    note_type_name = f"Missing NT ID: {note_type_id}"
+
+            deck_name = "Any Deck"
+            if deck_id:
+                dk = self.mw_instance.col.decks.get(DeckId(deck_id))
+                if dk:
+                    deck_name = dk["name"]
+                else:
+                    deck_name = f"Missing Deck ID: {deck_id}"
+
+            note_type_display_label = QLabel(note_type_name)
+            deck_display_label = QLabel(deck_name)
 
             edit_button = QPushButton("Edit")
+            # Corrected lambda to pass index 'idx'
             edit_button.clicked.connect(
-                lambda _, i=idx: self.add_or_edit_custom_config(i)
+                lambda checked=False, i=idx: self._add_or_edit_custom_config_entry(i)
             )
 
             delete_button = QPushButton("Delete")
-            delete_button.clicked.connect(lambda _, i=idx: self.delete_custom_config(i))
+            # Corrected lambda to pass index 'idx'
+            delete_button.clicked.connect(
+                lambda checked=False, i=idx: self._delete_custom_config_entry(i)
+            )
 
-            # entry_layout = QHBoxLayout()
-            # entry_layout.addWidget(entry_label)
-            # entry_layout.addWidget(edit_button)
-            # entry_layout.addWidget(delete_button)
-            #
-            # entry_widget = QWidget()
-            # entry_widget.setLayout(entry_layout)
+            # Add widgets to grid
+            self.custom_configs_content_grid_layout.addWidget(note_type_display_label, idx + 1, 0)
+            self.custom_configs_content_grid_layout.addWidget(deck_display_label, idx + 1, 1)
+            self.custom_configs_content_grid_layout.addWidget(edit_button, idx + 1, 2)
+            self.custom_configs_content_grid_layout.addWidget(delete_button, idx + 1, 3)
 
-            for column, widget in enumerate(
-                [note_type_label, deck_label, edit_button, delete_button]
-            ):
-                self.custom_configs_content_grid_layout.addWidget(
-                    widget, idx + 1, column, 1, 1
-                )
+    def _add_or_edit_custom_config_entry(self, index: Optional[int] = None): # Renamed
+        self.logger.debug(f"ConfigDialog: Add/Edit custom config entry at index {index}.")
 
-    def _add_or_edit_custom_config_entry(self, index: int | None = None): # Renamed
-        self.logger.debug(f"Add/Edit custom config entry: index {index} (placeholder).")
+        custom_configs_list = self.config_to_edit.get("custom_config", [])
+        note_type_id_param: Optional[NotetypeId] = None
+        deck_id_param: Optional[DeckId] = None
+        custom_settings_data: Dict[str, Any] = {}
 
-        # This would create and exec a CustomConfigDialog instance.
-        # custom_settings = self.config_to_edit.get("custom_config", [])[index] if index is not None else {}
-        # dialog = CustomConfigDialog(self, ..., current_mw_ref=self.mw_instance, addon_name_param=self.addon_name)
-        # if dialog.exec... update self.config_to_edit and self._update_custom_configs_display()
-
-        if index is None:
-            logger.debug("Adding new custom config.")
-            note_type_id, deck_id, custom_settings = None, None, {}
+        if index is not None and index < len(custom_configs_list):
+            entry = custom_configs_list[index]
+            note_type_id_param = NotetypeId(entry[0]) if entry[0] else None
+            deck_id_param = DeckId(entry[1]) if entry[1] else None
+            custom_settings_data = entry[2] # This is the dictionary of settings
+            self.logger.debug(f"Editing entry: NTID={note_type_id_param}, DID={deck_id_param}, Settings={custom_settings_data}")
         else:
-            logger.debug("Editing existing custom config.")
-            note_type_id, deck_id, custom_settings = self.config["custom_config"][index]
+            self.logger.debug("Creating new custom config entry.")
 
-        dialog = CustomConfigDialog(self, note_type_id, deck_id, custom_settings)
+        dialog = CustomConfigDialog(
+            parent_dialog=self,
+            note_type_id_param=note_type_id_param,
+            deck_id_param=deck_id_param,
+            custom_settings_data=custom_settings_data, # Pass the dict here
+            current_mw_ref=self.mw_instance,
+            addon_name_param=self.addon_name
+        )
 
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            updated_entry = [dialog.note_type, dialog.deck, dialog.config]
+            self.logger.debug("CustomConfigDialog accepted.")
+            new_note_type_id = dialog.note_type_id_result
+            new_deck_id = dialog.deck_id_result
+            # dialog.config_to_edit contains the settings edited in CustomConfigDialog
+            new_settings = dialog.config_to_edit
+
+            updated_entry = [
+                new_note_type_id if new_note_type_id is not None else None,
+                new_deck_id if new_deck_id is not None else None,
+                new_settings
+            ]
+            self.logger.debug(f"Updated entry data: {updated_entry}")
+
+            current_custom_configs = self.config_to_edit.setdefault("custom_config", [])
             if index is None:
-                self.config.setdefault("custom_config", []).append(updated_entry)
+                current_custom_configs.append(updated_entry)
+                self.logger.debug("Appended new custom config.")
+            elif index < len(current_custom_configs):
+                current_custom_configs[index] = updated_entry
+                self.logger.debug(f"Updated custom config at index {index}.")
             else:
-                self.config["custom_config"][index] = updated_entry
+                self.logger.error(f"Error updating custom config: index {index} out of bounds for list of len {len(current_custom_configs)}")
+
             self._update_custom_configs_display()
+        else:
+            self.logger.debug("CustomConfigDialog cancelled or closed.")
 
 
     def _delete_custom_config_entry(self, index: int): # Renamed
         """Delete a custom configuration."""
-        self.config["custom_config"].pop(index)
-        self.update_custom_configs_ui()
+        self.logger.debug(f"ConfigDialog: Attempting to delete custom config at index {index}.")
+        custom_configs_list = self.config_to_edit.get("custom_config", [])
+        if 0 <= index < len(custom_configs_list):
+            custom_configs_list.pop(index)
+            self.logger.info(f"Deleted custom config entry at index {index}.")
+            self._update_custom_configs_display()
+        else:
+            self.logger.warning(f"Could not delete custom config at index {index}: index out of bounds.")
 
     def _add_action_buttons(self): # Renamed
         button_layout = QHBoxLayout()
@@ -955,29 +1190,132 @@ class ConfigDialog(QDialog):
         self.logger.info(f"Configuration for '{self.addon_name}' saved and applied.")
         self.accept()
 
-# --- CustomConfigDialog (Simplified placeholder) ---
+# --- CustomConfigDialog ---
 class CustomConfigDialog(ConfigDialog): # Inherits from ConfigDialog
-    def __init__(self, parent_dialog: ConfigDialog, 
-                 note_type_id_param: Optional[int]=None, deck_id_param: Optional[int]=None, 
-                 custom_settings_data: Optional[Dict]=None, 
+    def __init__(self, parent_dialog: ConfigDialog,
+                 note_type_id_param: Optional[NotetypeId]=None, deck_id_param: Optional[DeckId]=None,
+                 custom_settings_data: Optional[Dict[str, Any]]=None,
                  current_mw_ref: Optional[QMainWindow]=None, addon_name_param: str=""):
         
-        # For CustomConfigDialog, the 'config_data_override' is the specific custom_settings_data
-        super().__init__(parent=parent_dialog, 
-                         config_data_override=custom_settings_data or {}, 
-                         current_mw_ref=current_mw_ref, 
+        # Initialize with a deepcopy of the specific custom_settings_data for editing.
+        # The superclass ConfigDialog's self.config_to_edit will be this specific dictionary.
+        super().__init__(parent=parent_dialog,
+                         config_data_override=deepcopy(custom_settings_data) if custom_settings_data is not None else {},
+                         current_mw_ref=current_mw_ref,
                          addon_name_param=addon_name_param)
-        self.setWindowTitle(f"Edit Custom Config for {self.addon_name}")
-        # ... (Specific UI for selecting note type, deck, and overriding specific config keys) ...
-        # Must exclude certain global keys from being overridden here.
+
+        self.setWindowTitle(f"Edit Custom Configuration for {self.addon_name}")
+        self.note_type_id_param = note_type_id_param
+        self.deck_id_param = deck_id_param
+
+        # These will store the results when the dialog is accepted
+        self.note_type_id_result: Optional[NotetypeId] = self.note_type_id_param
+        self.deck_id_result: Optional[DeckId] = self.deck_id_param
+
+        self._close_event_has_cleaned_up = False # For chooser cleanup
+
+        # self.config_to_edit is already a deepcopy from super().__init__
+        # if custom_settings_data is None, self.config_to_edit will be an empty dict {}
+        # which is the desired behavior for a new custom config.
 
     def _init_form_elements(self): # Override to customize form for custom config
-        self.logger.info("CustomConfigDialog form elements (placeholder).")
-        # Add selectors for Note Type and Deck
-        # Add widgets for only the overridable config keys (exclude api_key, debug, etc.)
-        # Need to handle 'unset' state for each config key in custom config.
-        self._add_action_buttons() # Save/Cancel for this sub-dialog
+        self.logger.debug(f"CustomConfigDialog: Initializing form elements. Editing: {self.config_to_edit}")
+        # Do not call super()._init_form_elements() as we have a different layout.
+        self.config_widgets_map.clear() # Ensure it's empty
 
+        # Chooser for Note Type
+        self.note_type_combo_widget = QWidget(self) # Parent for NotetypeChooser's layout
+        self.notetype_chooser_instance = NotetypeChooser(
+            mw=self.mw_instance,
+            widget=self.note_type_combo_widget,
+            starting_notetype_id=self.note_type_id_param
+        )
+        self.form_layout.addRow(QLabel("Note Type:"), self.note_type_combo_widget)
+
+        # Chooser for Deck
+        self.deck_combo_widget = QWidget(self) # Parent for DeckChooser's layout
+        self.deck_chooser_instance = DeckChooser(
+            mw=self.mw_instance,
+            widget=self.deck_combo_widget,
+            starting_deck_id=self.deck_id_param,
+            show_all_decks_button=True # Allow "Any Deck" concept if DeckChooser supports None
+        )
+        self.form_layout.addRow(QLabel("Deck:"), self.deck_combo_widget)
+
+        # Define overridable keys
+        overridable_keys = [
+            "create_prompt", "complete_prompt", "model_temperature", "model_name",
+            "max_output_tokens", "note_tag", "processed_tag", "prompt_tag",
+            "custom_prompt_tag", "complete_tag", "json_tag"
+        ]
+
+        global_defaults = self.mw_instance.addonManager.addonConfigDefaults(self.addon_name) or {}
+
+        for key in overridable_keys:
+            # Value from existing custom config, or global default if not set
+            current_value = self.config_to_edit.get(key, global_defaults.get(key))
+
+            widget_data = self._create_config_widget_ui(key, current_value)
+            if widget_data:
+                # Optional: Add a checkbox to indicate if this setting is overridden or inherited
+                # For now, any value set/present in the dialog will be saved as an override.
+                self.form_layout.addRow(widget_data["label"], widget_data["widget"])
+                self.config_widgets_map[key] = widget_data
+
+        self._add_action_buttons() # Adds Save/Cancel buttons
+
+    def save_configuration_handler(self): # Override for custom config saving
+        self.logger.info(f"CustomConfigDialog: Saving custom configuration for {self.addon_name}.")
+
+        # Update results from choosers
+        self.note_type_id_result = self.notetype_chooser_instance.selected_notetype_id
+        self.deck_id_result = self.deck_chooser_instance.selected_deck_id
+
+        # The inherited save_configuration_handler from ConfigDialog updates self.config_to_edit
+        # by iterating self.config_widgets_map. This is what we want.
+        # However, the superclass method also writes to addonManager and updates global config,
+        # which is NOT what we want here. We only want to populate self.config_to_edit.
+
+        updated_data_from_widgets = {}
+        for key, data in self.config_widgets_map.items():
+            if data.get('get_fn'): # Check if get_fn exists
+                try:
+                    updated_data_from_widgets[key] = data['get_fn']()
+                except Exception as e:
+                    self.logger.error(f"Error getting value for key {key}: {e}", exc_info=True)
+
+        self.config_to_edit.update(updated_data_from_widgets)
+        # self.config_to_edit now contains the settings for this specific custom config.
+        # No need to call mw.addonManager.writeConfig here, that's for the main config dialog.
+
+        self.logger.debug(f"CustomConfigDialog: Updated config_to_edit: {self.config_to_edit}")
+        self.accept() # Closes the dialog with QDialog.DialogCode.Accepted
+
+    def _cleanup_choosers(self):
+        if not self._close_event_has_cleaned_up:
+            self.logger.debug("CustomConfigDialog: Cleaning up choosers.")
+            if hasattr(self, 'notetype_chooser_instance') and self.notetype_chooser_instance:
+                self.notetype_chooser_instance.cleanup()
+                self.logger.debug("Cleaned up notetype_chooser_instance.")
+            if hasattr(self, 'deck_chooser_instance') and self.deck_chooser_instance:
+                self.deck_chooser_instance.cleanup()
+                self.logger.debug("Cleaned up deck_chooser_instance.")
+            self._close_event_has_cleaned_up = True
+
+    def accept(self) -> None:
+        self.logger.debug("CustomConfigDialog: Accepted.")
+        self._cleanup_choosers()
+        super().accept() # Call QDialog.accept()
+
+    def reject(self) -> None:
+        self.logger.debug("CustomConfigDialog: Rejected.")
+        self._cleanup_choosers()
+        super().reject() # Call QDialog.reject()
+
+    def closeEvent(self, event): # Ensure cleanup on any close
+        self.logger.debug("CustomConfigDialog: closeEvent triggered.")
+        self._cleanup_choosers()
+        super().closeEvent(event)
 
 # --- show_config_dialog_action ---
 def show_config_dialog_action(current_mw_ref: QMainWindow, addon_name_str: str = None):
