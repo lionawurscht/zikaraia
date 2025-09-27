@@ -9,11 +9,8 @@ from aqt.qt import QAction, qconnect
 # if __name__ within config_utils doesn't resolve correctly to the addon's root name.
 # For now, we assume it's handled or will be adjusted if issues arise.
 from .zikaria.config_utils import logger, config, update_config, ADDON_NAME
-from .zikaria.anki_utils import (
-    ensure_tags_exist,
-    API_KEY_MISSING,
-    DISABLE_ON_SYNC,
-)
+from .zikaria.anki_utils import ensure_tags_exist
+from .zikaria import anki_utils
 from .zikaria.core import ZikariaPrompts
 from .zikaria.ui import (
     show_config_dialog_action,
@@ -21,6 +18,7 @@ from .zikaria.ui import (
     open_prompt_text_dialog_action,
     add_debug_menu_to_browser_action,
     on_browser_context_menu_action,
+    open_saved_prompts_manager,
 )
 
 # --- Main Add-on Logic Setup ---
@@ -74,13 +72,13 @@ def on_sync_did_finish_hook():
         return
 
     # Globals are imported from anki_utils
-    if DISABLE_ON_SYNC:
+    if anki_utils.DISABLE_ON_SYNC:
         logger.info(
             f"Zikaria ({ADDON_NAME}): Note processing on sync is disabled due to a previous error."
         )
         return
 
-    if API_KEY_MISSING:
+    if anki_utils.API_KEY_MISSING:
         logger.info(
             f"Zikaria ({ADDON_NAME}): Note processing on sync is disabled due to missing API key."
         )
@@ -116,11 +114,14 @@ gui_hooks.browser_will_show_context_menu.append(on_browser_context_menu_action)
 # --- Menu Item Setup ---
 
 # Main action for manual processing
-zikaria_manual_process_action_menu = QAction("Process Zikaria Notes", mw)
+mw.form.menuZikaria = menu_zikaria = mw.form.menubar.addMenu("Zikaria")
+
+zikaria_manual_process_action_menu = QAction("Process Notes", mw)
 qconnect(
     zikaria_manual_process_action_menu.triggered, zikaria_process_notes_manual_action
 )
-mw.form.menuTools.addAction(zikaria_manual_process_action_menu)
+
+menu_zikaria.addAction(zikaria_manual_process_action_menu)
 
 
 # Configuration dialog action
@@ -133,35 +134,37 @@ if mw.addonManager:
     mw.addonManager.setConfigAction(ADDON_NAME, lambda: show_config_dialog_action(mw))
 
     # Also add to Tools menu for easier access
-    zikaria_config_menu_action = QAction(
-        f"Zikaria Addon Configuration ({ADDON_NAME})...", mw
-    )
+    zikaria_config_menu_action = QAction("Configuration", mw)
     qconnect(
         zikaria_config_menu_action.triggered, lambda: show_config_dialog_action(mw)
     )
-    mw.form.menuTools.addAction(zikaria_config_menu_action)
+    menu_zikaria.addAction(zikaria_config_menu_action)
 
 
 # "Process JSON Input" action
 # on_process_json_triggered_action is imported from ui.py
-zikaria_process_json_menu_action = QAction("Zikaria: Process JSON Input...", mw)
+zikaria_process_json_menu_action = QAction("Import from JSON", mw)
 qconnect(
     zikaria_process_json_menu_action.triggered,
     lambda: on_process_json_triggered_action(mw),
 )
-mw.form.menuTools.addAction(zikaria_process_json_menu_action)
+menu_zikaria.addAction(zikaria_process_json_menu_action)
 
 # "Create Cards from Prompt Text" action
 # open_prompt_text_dialog_action is imported from ui.py
-zikaria_create_from_text_menu_action = QAction(
-    "Zikaria: Create Cards from Prompt Text...", mw
-)
+zikaria_create_from_text_menu_action = QAction("Create Card from Prompt", mw)
 qconnect(
     zikaria_create_from_text_menu_action.triggered,
     lambda: open_prompt_text_dialog_action(mw),
 )
-mw.form.menuTools.addAction(zikaria_create_from_text_menu_action)
+menu_zikaria.addAction(zikaria_create_from_text_menu_action)
 
+zikaria_manage_saved_prompts = QAction("Manage Saved Prompts", mw)
+qconnect(
+    zikaria_manage_saved_prompts.triggered,
+    lambda: open_saved_prompts_manager(mw, mw),
+)
+menu_zikaria.addAction(zikaria_manage_saved_prompts)
 
 logger.info(
     f"Zikaria Addon ({ADDON_NAME if ADDON_NAME else __name__}) loaded successfully with modular structure."

@@ -1,4 +1,5 @@
 import logging
+import pathlib
 from typing import Optional
 from aqt import mw
 
@@ -14,6 +15,9 @@ logger = (
     else logging.getLogger(__name__)
 )
 
+addon_root_dir = pathlib.Path(__file__).resolve().parent.parent
+user_files_dir = addon_root_dir / "user_files"
+
 if config:
     logger.info(config)
     logger.setLevel(logging.DEBUG if config.get("debug", False) else logging.INFO)
@@ -23,6 +27,7 @@ else:  # Default logging if config is not loaded (e.g. testing)
 
 def get_config():
     return config
+
 
 def get_addon_name():
     return "zikaria"
@@ -62,7 +67,7 @@ def score_custom_config_entry(entry, note_type_id, deck_id):
     :param deck_id: The target deck ID.
     :return: A tuple representing the score (higher is better).
     """
-    entry_note_type_id, entry_deck_id, _ = entry
+    entry_note_type_id, entry_deck_id, *_ = entry
 
     # Perfect match
     if entry_note_type_id == note_type_id and entry_deck_id == deck_id:
@@ -125,9 +130,7 @@ def filter_and_sort_custom_config_entries(
     return sorted_entries
 
 
-def get_effective_config(
-    note_type_id: int, deck_id: int
-):
+def get_effective_config(note_type_id: int, deck_id: int):
     """
     Retrieve the effective configuration for a given note type and deck.
     This function is adapted from ZikariaPrompts.get_effective_config.
