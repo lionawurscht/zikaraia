@@ -1,18 +1,22 @@
 import os
 from collections import namedtuple
-from typing import Optional, List, Any, Dict  # Added List, Any, Dict
+from typing import Any
 
-from aqt import mw
-from aqt.utils import showInfo, getText
-from anki.notes import Note
-from anki.models import (
-    NotetypeId,
-)  # Ensure this is imported if used by NoteData or other funcs
 from anki.decks import DeckId  # Ensure this is imported
-import google.generativeai as genai
+from anki.models import (  # Ensure this is imported if used by NoteData or other funcs
+    NoteType,
+    NotetypeId,
+)
+from anki.notes import Note
+from aqt import mw
+from aqt.utils import getText, showInfo
+from google import genai
+from google.genai import types
+from pydantic import BaseModel, ValidationError
 
 # Use accessors for config and logger
-from .config_utils import get_config, get_logger, get_config_value
+from .config_utils import get_config, get_config_value, logger
+from .prompts import generate_pydantic_class
 
 # Globals related to API Key - these are module-level state, managed by functions below.
 API_KEY_MISSING = False  # Default state
@@ -22,17 +26,91 @@ API_KEY = None  # Default state
 DISABLE_ON_SYNC = False  # Default state
 
 
-def is_valid_cards_data(data: Any) -> bool:
+# --- Helper Function for Recursive Processing ---
+def _process_value(
+    value: Any, pydantic_note_model: type[BaseModel]
+) -> list[dict[str, Any]]:
+    """
+    Recursively processes a value which could be a single note dict,
+    a list of note dicts, or a dictionary containing nested notes.
+    """
+    normalized_notes = []
+
+    if isinstance(value, dict):
+        # 1. Check if the dictionary itself is a valid single note
+        try:
+            # Validate it against the Pydantic model
+            validated_note = pydantic_note_model.model_validate(value)
+            # Add the validated, clean dictionary representation
+            # normalized_notes.append(value)
+            normalized_notes.append(validated_note.model_dump())
+        except ValidationError:
+            logger.exception("Error Validating, trying values:\n%s", value)
+            # 2. If not a single note, it's the undesired 'key-grouped' format.
+            # Recursively process all values inside this dict.
+            for nested_value in value.values():
+                normalized_notes.extend(
+                    _process_value(nested_value, pydantic_note_model)
+                )
+
+    elif isinstance(value, list):
+        # 3. If it's a list, process each item in the list
+        for item in value:
+            normalized_notes.extend(_process_value(item, pydantic_note_model))
+
+    # 4. Any other type is ignored (e.g., a non-note string or number that snuck in)
+    return normalized_notes
+
+
+# ----------------------------------------------------------------------
+# --- Main Normalization Function ---
+# ----------------------------------------------------------------------
+
+
+def normalize_ai_response(data: Any, note_type: NoteType) -> list[dict[str, Any]]:
+    """
+    Normalizes a flexible AI JSON response into a flat list of valid note dictionaries.
+
+    It accepts:
+    1. A list of valid note dictionaries (the desired format).
+    2. A single dictionary representing one valid note.
+    3. A dict where keys map to either a list of valid notes or a single valid note
+       (the 'stubborn AI' format: {"word": {... or [...]}, ...}).
+    4. A nested list/dict structure containing the above elements.
+
+    Args:
+        data: The raw data returned by the AI (can be a list or a dict).
+        NoteModel: The Pydantic model class for a single valid note.
+
+    Returns:
+        A list of dictionaries, where each dict is a validated note.
+    """
+    pydantic_note_model = generate_pydantic_class(note_type, enforce_enum=False)
+
+    if isinstance(data, list):
+        # Input is a list (Case 1), process all elements
+        return _process_value(data, pydantic_note_model)
+
+    elif isinstance(data, dict):
+        # Input is a dict (Case 2 or 3), process it via the recursive helper
+        return _process_value(data, pydantic_note_model)
+
+    else:
+        # Input is not a list or dict, return empty list
+        return []
+
+
+def is_valid_notes_data(data: Any) -> bool:
     """Validate if the data is a list of dicts with string keys and values."""
     if not isinstance(data, list):
         return False
     for item in data:
-        if not is_valid_card_data(item):  # Relies on the other validation function
+        if not is_valid_note_data(item):  # Relies on the other validation function
             return False
     return True
 
 
-def is_valid_card_data(item: Any) -> bool:
+def is_valid_note_data(item: Any) -> bool:
     """Validate if the data is a dict with string keys and values."""
     if not isinstance(item, dict):
         return False
@@ -54,77 +132,104 @@ def is_valid_card_data(item: Any) -> bool:
 
 
 # Define the Note namedtuple (remains as is)
-NoteData = namedtuple("NoteData", ["note_type_id", "deck_id", "fields", "tags"])
+# NoteData = namedtuple("NoteData", ["note_type_id", "deck_id", "fields", "tags"])
 
 
-def json_to_namedtuples(
-    json_data: List[Dict[str, Any]],
-    note_type_id: int,  # Changed from NotetypeId to int for consistency
-    deck_id: int,  # Changed from DeckId to int
-) -> List[NoteData]:
-    """Convert a JSON list of dictionaries into a list of Note namedtuples."""
-    notes = []
-    for entry in json_data:
-        tags = entry.pop("__tags", [])
-        notes.append(
-            NoteData(
-                note_type_id=note_type_id,
-                deck_id=deck_id,
-                fields=entry,
-                tags=tags,
+# def json_to_namedtuples(
+#     json_data: list[dict[str, Any]],
+#     note_type_id: int,  # Changed from NotetypeId to int for consistency
+#     deck_id: int,  # Changed from DeckId to int
+# ) -> list[NoteData]:
+#     """Convert a JSON list of dictionaries into a list of Note namedtuples."""
+#     notes = []
+#     for entry in json_data:
+#         tags = entry.pop("__tags", [])
+#         notes.append(
+#             NoteData(
+#                 note_type_id=note_type_id,
+#                 deck_id=deck_id,
+#                 fields=entry,
+#                 tags=tags,
+#             )
+#         )
+#     return notes
+
+
+class GeminiClientProxy:
+    def __init__(self):
+        self._client = None
+        self._api_key = None
+
+    def _get_api_key(self):
+        # Try config
+        api_key = get_config_value("api_key")
+
+        # Try environment
+        if not api_key:
+            api_key = os.getenv("GEMINI_API_KEY", os.getenv("GOOGLE_API_KEY"))
+
+        # Validate type
+        if api_key and not isinstance(api_key, str):
+            raise TypeError(f"Gemini API key should be a string, is: {type(api_key)}")
+
+        # Prompt user if missing
+        if not api_key:
+            if mw is None:
+                logger.error("mw is None, cannot show API key dialog.")
+                raise RuntimeError(
+                    "No Gemini API key set in config or env and user input not possible, since Anki isn't running."
+                )
+            key, ok = getText(
+                "Enter your Generative AI API key:", title="API Key Required", parent=mw
             )
-        )
-    return notes
-
-
-def ensure_api_key() -> bool:
-    """Ensures that the API key is set. Modifies global API_KEY and API_KEY_MISSING."""
-    global API_KEY, API_KEY_MISSING
-    logger = get_logger()  # Use accessor
-
-    if API_KEY:  # If already set in this session
-        return True
-
-    # Use get_config_value for consistency, or get_config().get()
-    api_key_from_config = get_config_value("api_key")
-    # Allow override from environment variable (e.g. for testing or CI)
-    # GEMINI_API_KEY is kept for backward compatibility if users have it set
-    api_key_env = os.getenv("GEMINI_API_KEY", os.getenv("ZIKARIA_API_KEY"))
-
-    current_api_key = api_key_env or api_key_from_config
-
-    if not current_api_key:
-        if mw is None:  # Should not happen in normal Anki environment
-            logger.error("mw is None, cannot show API key dialog.")
-            API_KEY_MISSING = True
-            return False
-
-        key, ok = getText(
-            "Enter your Generative AI API key:", title="API Key Required", parent=mw
-        )
-        if ok and key:
-            API_KEY = key.strip()
-            API_KEY_MISSING = False
-            # Optionally, inform user this key is for the session and to save in config for persistence
-            logger.info("API key entered manually for this session.")
-            # It's generally better for ConfigDialog to handle saving the key to config.
-        else:  # Cancelled or empty
+            if ok and key:
+                api_key = key.strip()
+                logger.info("API key entered manually for this session.")
+        if not api_key:
             showInfo("API key is required for Zikaria to function.", parent=mw)
-            API_KEY_MISSING = True
-            return False
-    else:
-        API_KEY = current_api_key.strip()
-        API_KEY_MISSING = False
+            return None
+        return api_key
 
-    logger.debug(
-        f"API Key set: {'Yes' if API_KEY else 'No'}, Missing flag: {API_KEY_MISSING}"
-    )
-    return not API_KEY_MISSING
+    def _setup_client(self):
+        if self._client is not None:
+            return True
+        api_key = self._get_api_key()
+        if not api_key:
+            logger.info(
+                "API key not available or user cancelled. Generative AI configuration aborted."
+            )
+            return False
+        timeout = get_config_value("request_timeout", 60000)
+        logger.debug("Configuring client with a http timeout of %s seconds.", timeout)
+
+        try:
+            self._client = genai.Client(
+                api_key=api_key,
+                http_options=types.HttpOptions(timeout=int(timeout)),
+            )
+            logger.info("Generative AI configured successfully.")
+            return True
+        except Exception as e:
+            logger.error(f"Error creating gemini client: {e}", exc_info=True)
+            return False
+
+    @property
+    def client(self):
+        if self._client is None:
+            self._setup_client()
+        return self._client
+
+    def __bool__(self):
+        if self._client is None:
+            return self._setup_client()
+        return self._client is not None
+
+
+gemini_client_proxy = GeminiClientProxy()
 
 
 def ensure_tags_exist():
     """Ensures that the required tags (from config) are present in the collection."""
-    logger = get_logger()
     current_config = get_config()  # Use accessor
 
     if not mw or not mw.col:
@@ -205,35 +310,9 @@ def ensure_tags_exist():
         )
 
 
-def configure_generative_ai() -> bool:
-    """Configures the Generative AI client. Uses global API_KEY set by ensure_api_key."""
-    global API_KEY_MISSING, API_KEY  # We need API_KEY which is set by ensure_api_key
-    logger = get_logger()
-
-    if not ensure_api_key():  # This will prompt user if key is missing
-        logger.info(
-            "API key not available or user cancelled. Generative AI configuration aborted."
-        )
-        # API_KEY_MISSING is set by ensure_api_key()
-        return False
-
-    try:
-        genai.configure(
-            api_key=API_KEY
-        )  # API_KEY is now guaranteed to be set if ensure_api_key returned True
-        API_KEY_MISSING = False  # Explicitly reset if configuration is successful
-        logger.info("Generative AI configured successfully.")
-        return True
-    except Exception as e:
-        logger.error(f"Error configuring Generative AI library: {e}", exc_info=True)
-        API_KEY_MISSING = True
-        return False
-
-
 def disable_running_on_sync():
     """Disables automatic processing on sync for the current session, usually after an error."""
     global DISABLE_ON_SYNC
-    logger = get_logger()
     if not DISABLE_ON_SYNC:
         DISABLE_ON_SYNC = True
         logger.info(
@@ -241,9 +320,8 @@ def disable_running_on_sync():
         )
 
 
-def get_deck_ancestor_ids(did: Optional[int]) -> List[int]:  # did can be None
+def get_deck_ancestor_ids(did: int | None) -> list[int]:  # did can be None
     """Retrieve all ancestor deck IDs for a given deck ID."""
-    logger = get_logger()
     if not mw or not mw.col:
         logger.error("mw.col not available for get_deck_ancestor_ids.")
         return []

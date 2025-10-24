@@ -1,79 +1,101 @@
 import json
 import os
-from typing import Optional, List, Dict, Any, Literal
-from collections import namedtuple  # For NoteData if it's used by dialogs directly
 import uuid
+from copy import deepcopy
+from typing import Any, Dict, List, Literal, Optional, cast
 
-from aqt import QMainWindow, gui_hooks, mw, colors
-from aqt.utils import showInfo, getText, tr, tooltip, shortcut
-from aqt.qt import (
-    QAction,
-    qconnect,
-    QDialog,
-    QWidget,
-    QHBoxLayout,
-    QGridLayout,
-    QLabel,
-    QLineEdit,
-    QTextEdit,
-    QPushButton,
-    QSpinBox,
-    QDoubleSpinBox,
-    QCheckBox,
-    QFormLayout,
-    QVBoxLayout,
-    QScrollArea,
-    QDialogButtonBox,
-    QFrame,
-    Qt,
-    QComboBox,
-    QTabWidget,
-    QApplication,
-    QSizePolicy,
-    pyqtSignal,
-)
-from aqt.studydeck import StudyDeck
-from aqt.tagedit import TagEdit
-from aqt.editor import Editor, EditorMode
-from aqt.theme import theme_manager
+from anki.collection import Collection, SearchNode
+from anki.decks import DeckId  # Added DeckId
+from anki.models import NotetypeId  # Added NotetypeId
+from anki.notes import Note, NoteFieldsCheckResult
+from aqt import QMainWindow, colors, gui_hooks, mw
 from aqt.browser.browser import Browser
 from aqt.deckchooser import DeckChooser
+# from aqt.editor import Editor, EditorMode
 from aqt.notetypechooser import NotetypeChooser
-from anki.notes import Note
-from anki.models import NoteType, NotetypeId  # Added NotetypeId
-from anki.decks import DeckId  # Added DeckId
-from aqt.operations.note import add_note
-from copy import deepcopy
+from aqt.operations import QueryOp
+# from aqt.operations.note import add_note
+from aqt.qt import (QAction, QApplication, QCheckBox, QCloseEvent, QComboBox,
+                    QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
+                    QFrame, QGridLayout, QGroupBox, QGuiApplication,
+                    QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea,
+                    QSizePolicy, QSpinBox, Qt, QTabWidget, QTextEdit, QTimer,
+                    QVBoxLayout, QWidget, pyqtSignal, qconnect)
+from aqt.studydeck import StudyDeck
+from aqt.tagedit import TagEdit
+from aqt.theme import theme_manager
+from aqt.utils import getText, shortcut, showInfo, tooltip, tr
 
+from .anki_utils import is_valid_notes_data, replace_nulls_with_empty_strings
 # Imports from other modules in this addon
-from .config_utils import (
-    get_config,
-    get_logger,
-    # get_config_value,
-    get_addon_name,
-    score_custom_config_entry,
-    filter_and_sort_custom_config_entries,
-    get_effective_config,
-)
-from .anki_utils import (
-    is_valid_cards_data,
-    is_valid_card_data,
-    NoteData,
-    json_to_namedtuples,
-    replace_nulls_with_empty_strings,
-    configure_generative_ai,
-)
-from .prompts import (
-    generate_schema_class,
-    example_notes,
-    get_prompt,
-    get_create_prompt,
-    get_complete_prompt,
-)
-
+from .config_utils import (get_addon_name, get_config, get_effective_config,
+                           logger)
 from .prompt_store import load_saved_prompts, save_saved_prompts
+from .prompts import (example_notes, generate_pydantic_class,
+                      generate_schema_class, get_prompt_text,
+                      get_prompt_text_by_mode, get_prompt_text_from_note)
 
 # from .core import ZikariaPrompts # Avoid circular import if core imports ui
+
+
+def create_confirmation_dialog(
+    title: str,
+    message: str,
+    parent=None,
+    buttons: dict[str, Any] | None = None,
+) -> Any:
+    """
+    Creates and shows a confirmation dialog with a dynamic maximum width.
+    The maximum width is set to the screen's width, with a configurable margin.
+
+    Args:
+        title (str): The title of the dialog.
+        message (str): The message to display.
+        parent (QWidget, optional): The parent widget. Defaults to None.
+        buttons (dict[str, Any], optional): A dictionary of button labels and
+                                            return values. Defaults to {"OK": True, "Cancel": False}.
+
+    Returns:
+        Any: The return value of the button that was clicked.
+    """
+    # Create the dialog with the provided parent
+    dialog = QDialog(parent)
+    dialog.setWindowTitle(title)
+
+    # Get the screen's width from the QGuiApplication instance
+    screen = QGuiApplication.primaryScreen()
+    if screen:
+        screen_width = screen.geometry().width()
+        margin = 100  # Adjust this margin as needed for spacing
+        max_dialog_width = screen_width - margin
+        dialog.setMaximumWidth(max_dialog_width)
+    else:
+        # Fallback if screen information is unavailable
+        dialog.setMaximumWidth(600)
+
+    # Create the main layout and message label
+    layout = QVBoxLayout(dialog)
+    message_label = QLabel(message)
+    message_label.setWordWrap(True)  # Enable word wrapping for the message
+    layout.addWidget(message_label)
+
+    # Use default buttons if none are provided
+    if buttons is None:
+        buttons = {"OK": True, "Cancel": False}
+
+    # Create the horizontal button layout
+    button_layout = QHBoxLayout()
+    for label, return_value in buttons.items():
+        button = QPushButton(label)
+        button.clicked.connect(lambda _, rv=return_value: dialog.done(rv))
+        button_layout.addWidget(button)
+
+    # Add the button layout to the main layout
+    layout.addLayout(button_layout)
+
+    # Execute the dialog and return the result
+    return dialog.exec()
+
 
 class ChoosersMixin:
     def __init__(self, *args, **kwargs):
@@ -88,23 +110,21 @@ class ChoosersMixin:
         on_notetype_changed=None,
         on_deck_changed=None,
     ) -> None:  # Renamed
-        defaults = self.mw_instance.col.defaults_for_adding(
-            current_review_card=(
-                self.mw_instance.reviewer.card if self.mw_instance.reviewer else None
-            )
+        defaults = mw.col.defaults_for_adding(
+            current_review_card=(mw.reviewer.card if mw.reviewer else None)
         )
         note_type_id = note_type_id or defaults.notetype_id
         deck_id = deck_id or defaults.deck_id
 
         self.notetype_chooser_instance = NotetypeChooser(
-            mw=self.mw_instance,
+            mw=mw,
             widget=self.note_type_combo_widget,
             starting_notetype_id=NotetypeId(note_type_id),
             show_prefix_label=show_prefix_label,
             on_notetype_changed=on_notetype_changed,
         )
         self.deck_chooser_instance = DeckChooser(
-            mw=self.mw_instance,
+            mw=mw,
             widget=self.deck_combo_widget,
             starting_deck_id=DeckId(deck_id),
             label=show_prefix_label,
@@ -112,7 +132,6 @@ class ChoosersMixin:
         )
 
     def _cleanup_choosers(self):
-        logger = getattr(self, "logger", get_logger())
         if not self._close_event_has_cleaned_up:
             logger.debug("%s: Cleaning up choosers.", self.__class__.__name__)
 
@@ -128,408 +147,747 @@ class ChoosersMixin:
             self._close_event_has_cleaned_up = True
 
 
+def get_duplicate_note_ids_by_checksum(
+    note: Note, origin_note: Note | None = None
+) -> list[int]:
+    """
+    Finds all duplicate Note IDs (NIDs) in the collection that match
+    the first field and model type of the given note, using the official
+    SearchNode structure for programmatic searching.
+    """
+    col: Collection = mw.col
 
-# --- display_cards_confirmation_dialog ---
-def display_cards_confirmation_dialog(
-    cards_data_map: Dict[Note, List[Dict[str, Any]]],
-    parent: Optional[QWidget] = None,
-    global_tags: Optional[List[str]] = None,
-    current_mw_ref: Optional[QMainWindow] = None,
-) -> Dict[Note, List[Dict[str, Any]]]:
-    current_mw_ref = current_mw_ref or mw
-    logger = get_logger()  # Use accessor
+    # 1. Get the Note Type ID and the value of the first field.
+    mid = note.mid
+    note_type = col.models.get(mid)
 
-    class ConfirmationDialog(QDialog):
-        def __init__(
-            self,
-            cards_map: Dict[Note, List[Dict[str, Any]]],
-            parent_widget_ref=None,
-            global_tags_list_ref: Optional[List[str]] = None,
-        ):
-            super().__init__(parent_widget_ref or current_mw_ref)
-            self.mw_instance = current_mw_ref
-            self.setWindowTitle("Confirm New Cards")
-            self.resize(1200, 800)
+    if not note_type or not note_type["flds"]:
+        return []
 
-            total_cards = sum(len(data_list) for data_list in cards_map.values())
-            self.selected_cards_flags = [True] * total_cards
+    # Get the value of the *first field*. This is what Anki uses for duplicate checking.
+    # Note: We must ensure the field value used here is the *raw* value.
+    first_field_ord = note_type["flds"][0]["ord"]
+    first_field_value = note.fields[first_field_ord]
 
-            self.setStyleSheet("QWidget { font-size: 16px; }")
-            self.main_layout = QVBoxLayout()
-            self.setLayout(self.main_layout)
+    # Clean the field value for the search. This cleaning is handled
+    # implicitly by the SearchNode(dupe=...) logic in the Rust backend,
+    # but we pass the raw content here.
 
-            scroll_area = QScrollArea()
-            scroll_area.setWidgetResizable(True)
-            scroll_content_widget = QWidget()
-            scroll_layout = QVBoxLayout()
-            scroll_content_widget.setLayout(scroll_layout)
-
-            self.card_widgets_list_internal = []
-            card_global_idx = 0
-
-            for note_template, card_data_list_item in cards_map.items():
-                for card_data_item_dict in card_data_list_item:
-                    card_frame = QFrame()
-                    card_layout = QVBoxLayout()
-                    header_layout = QHBoxLayout()
-                    card_checkbox = QCheckBox(f"Card {card_global_idx + 1}")
-                    card_checkbox.setChecked(True)
-                    card_checkbox.stateChanged.connect(
-                        lambda state, idx=card_global_idx: self.toggle_card_selection(
-                            idx, state
-                        )
-                    )
-                    header_layout.addWidget(card_checkbox)
-                    card_layout.addLayout(header_layout)
-
-                    field_widgets_map = {}
-                    note_type_model = note_template.note_type()
-                    if not note_type_model:
-                        logger.error("ConfirmationDialog: Note template has no model.")
-                        continue
-
-                    present_keys = set()
-                    for field_def in note_type_model["flds"]:
-                        field_name = field_def["name"]
-                        value_str = card_data_item_dict.get(
-                            field_name, ""
-                        )  # Use .get for safety
-                        if field_name in card_data_item_dict:
-                            present_keys.add(field_name)
-
-                        field_layout = QHBoxLayout()
-                        field_label = QLabel(f"{field_name}:")
-                        field_edit = QLineEdit(
-                            str(value_str) if value_str is not None else ""
-                        )
-                        field_layout.addWidget(field_label)
-                        field_layout.addWidget(field_edit)
-                        card_layout.addLayout(field_layout)
-                        field_widgets_map[field_name] = field_edit
-
-                    tags_list = card_data_item_dict.get("tags", [])
-                    if "tags" in card_data_item_dict:
-                        present_keys.add("tags")
-
-                    unused_data_keys = [
-                        key for key in card_data_item_dict if key not in present_keys
-                    ]
-                    if unused_data_keys:
-                        rest_layout = QHBoxLayout()
-                        rest_label = QLabel("Unused data:")
-                        rest_edit = QLineEdit(
-                            json.dumps(
-                                {
-                                    key: card_data_item_dict[key]
-                                    for key in unused_data_keys
-                                }
-                            )
-                        )
-                        rest_edit.setReadOnly(True)
-                        rest_layout.addWidget(rest_label)
-                        rest_layout.addWidget(rest_edit)
-                        card_layout.addLayout(rest_layout)
-
-                    card_tag_edit_widget = self._get_card_tag_edit(
-                        tags_list, card_layout
-                    )
-                    self.card_widgets_list_internal.append(
-                        (
-                            card_checkbox,
-                            field_widgets_map,
-                            note_template,
-                            card_tag_edit_widget,
-                        )
-                    )
-                    card_frame.setLayout(card_layout)
-                    scroll_layout.addWidget(card_frame)
-                    card_global_idx += 1
-
-            scroll_area.setWidget(scroll_content_widget)
-            self.main_layout.addWidget(scroll_area)
-
-            bulk_action_layout = QHBoxLayout()
-            select_all_button = QPushButton("Select All")
-            select_all_button.clicked.connect(self.select_all_cards)  # Renamed method
-            bulk_action_layout.addWidget(select_all_button)
-            deselect_all_button = QPushButton("Select None")
-            deselect_all_button.clicked.connect(
-                self.deselect_all_cards
-            )  # Renamed method
-            bulk_action_layout.addWidget(deselect_all_button)
-            invert_selection_button = QPushButton("Invert Selection")
-            invert_selection_button.clicked.connect(
-                self.invert_card_selection
-            )  # Renamed method
-            bulk_action_layout.addWidget(invert_selection_button)
-            self.main_layout.addLayout(bulk_action_layout)
-
-            self._setup_global_tag_edit(global_tags_list_ref or [])
-
-            buttons = QDialogButtonBox(
-                QDialogButtonBox.StandardButton.Ok
-                | QDialogButtonBox.StandardButton.Cancel
-            )
-            buttons.accepted.connect(self.accept)
-            buttons.rejected.connect(self.reject)
-            self.main_layout.addWidget(buttons)
-
-        def _setup_global_tag_edit(self, global_tags_list: List[str]) -> None:
-            tag_edit_frame = QWidget(self)
-            tag_edit_frame.setStyleSheet("border: 0")
-            tag_edit_layout = QGridLayout()
-            tag_edit_layout.setSpacing(12)
-            tag_edit_layout.setContentsMargins(2, 6, 2, 6)
-            tag_edit_label = QLabel(tr.editing_tags())
-            tag_edit_layout.addWidget(tag_edit_label, 1, 0)
-            self.global_tag_edit_widget_internal = TagEdit(self)  # Renamed
-            self.global_tag_edit_widget_internal.setToolTip(
-                shortcut(tr.editing_jump_to_tags_with_ctrlandshiftandt())
-            )
-            border = theme_manager.var(
-                colors.BORDER
-            )  # Ensure theme_manager is available
-            self.global_tag_edit_widget_internal.setStyleSheet(
-                f"border: 1px solid {border}"
-            )
-            tag_edit_layout.addWidget(self.global_tag_edit_widget_internal, 1, 1)
-            tag_edit_frame.setLayout(tag_edit_layout)
-            self.main_layout.addWidget(tag_edit_frame)
-            if self.global_tag_edit_widget_internal.col != self.mw_instance.col:
-                self.global_tag_edit_widget_internal.setCol(self.mw_instance.col)
-            self.global_tag_edit_widget_internal.setText(
-                self.mw_instance.col.tags.join(global_tags_list)
-            )
-
-        def _get_card_tag_edit(
-            self, tags_list: List[str], card_layout_ref: QVBoxLayout
-        ) -> TagEdit:
-            tag_layout = QHBoxLayout()
-            tag_label = QLabel(f"{tr.editing_tags()}:")
-            tag_edit_widget = TagEdit(self)
-            tag_edit_widget.setToolTip(
-                shortcut(tr.editing_jump_to_tags_with_ctrlandshiftandt())
-            )
-            if tag_edit_widget.col != self.mw_instance.col:
-                tag_edit_widget.setCol(self.mw_instance.col)
-            tag_edit_widget.setText(self.mw_instance.col.tags.join(tags_list))
-            tag_layout.addWidget(tag_label)
-            tag_layout.addWidget(tag_edit_widget)
-            card_layout_ref.addLayout(tag_layout)
-            return tag_edit_widget
-
-        def toggle_card_selection(self, index: int, state: int) -> None:
-            self.selected_cards_flags[index] = (
-                Qt.CheckState(state) == Qt.CheckState.Checked
-            )
-
-        def select_all_cards(self) -> None:  # Renamed
-            for checkbox, *_ in self.card_widgets_list_internal:
-                checkbox.setChecked(True)
-
-        def deselect_all_cards(self) -> None:  # Renamed
-            for checkbox, *_ in self.card_widgets_list_internal:
-                checkbox.setChecked(False)
-
-        def invert_card_selection(self) -> None:  # Renamed
-            for checkbox, *_ in self.card_widgets_list_internal:
-                checkbox.setChecked(not checkbox.isChecked())
-
-        def get_confirmed_cards_data(
-            self,
-        ) -> Dict[Note, List[Dict[str, Any]]]:  # Renamed
-            global_tags_set = set(
-                self.mw_instance.col.tags.split(
-                    self.global_tag_edit_widget_internal.text()
-                )
-            )
-            confirmed_map = {}
-            for idx, selected_flag in enumerate(self.selected_cards_flags):
-                if selected_flag:
-                    _cb, fields_map, note_tmpl, tag_edit_w = (
-                        self.card_widgets_list_internal[idx]
-                    )
-                    tags_set = set(self.mw_instance.col.tags.split(tag_edit_w.text()))
-                    tags_set.update(global_tags_set)
-                    updated_data = {
-                        field_name: widget.text()
-                        for field_name, widget in fields_map.items()
-                    }
-                    updated_data["tags"] = list(tags_set)
-                    confirmed_map.setdefault(note_tmpl, []).append(updated_data)
-            return confirmed_map
-
-    dialog = ConfirmationDialog(
-        cards_map=cards_data_map,
-        parent_widget_ref=parent,
-        global_tags_list_ref=global_tags,
+    # 2. Construct the search using the official Dupe SearchNode structure.
+    # This structure is specifically designed to perform the first-field
+    # duplicate check, similar to the one used by the browser/editor (showDupes).
+    dupe_search_node = SearchNode(
+        dupe=SearchNode.Dupe(
+            notetype_id=mid,
+            first_field=first_field_value,
+        )
     )
-    if dialog.exec() == QDialog.DialogCode.Accepted:
-        return dialog.get_confirmed_cards_data()  # Use renamed method
-    return {}
+
+    # 3. Build the full search string and execute the search.
+    # We explicitly exclude the Note ID of the note being checked (if it's an existing note)
+    # to prevent it from finding itself.
+
+    # Combine the dupe search with an exclusion search
+    nids_to_exclude = []
+    if note.id:
+        nids_to_exclude.append(note.id)
+
+    if origin_note and origin_note.id and origin_note.id != note.id:
+        nids_to_exclude.append(origin_note.id)
+
+    # Create the search query string
+    search_query = col.build_search_string(
+        dupe_search_node,
+        *[f"-nid:{nid}" for nid in nids_to_exclude],  # Exclude the note being checked
+    )
+
+    logger.debug(f"Searching for duplicates using: {search_query}")
+
+    # Execute the search and cast the result to list[int]
+    duplicate_nids = cast(list[int], col.find_notes(search_query))
+
+    return duplicate_nids
 
 
-# --- ReviewAndEditNotesDialog ---
-class ReviewAndEditNotesDialog(QDialog):
+# Note: The usage of this function in _handle_dupe_result remains the same:
+# op=lambda _: get_duplicate_note_ids_by_checksum(note),
+# This ensures it runs in the background thread as intended.
+
+
+class DuplicateResolutionDialog(QDialog):
     def __init__(
         self,
-        notes_data_list: List[NoteData],
-        current_mw_ref: QMainWindow,
-        parent: Optional[QWidget] = None,
+        new_card_data: dict[str, Any],
+        new_note_template: Note,
+        duplicate_nids: list[int],
+        parent: QWidget | None = None,
     ):
-        super().__init__(parent or current_mw_ref)
-        self.notes_data_list = notes_data_list
-        self.mw_instance = current_mw_ref
-        self.logger = get_logger()
-        self.edited_notes_data: List[NoteData] = []
+        super().__init__(parent or mw)
+        self.setWindowTitle("Resolve Duplicates (Synchronized)")
+        self.new_note_template = new_note_template
+
+        # Central store for the new card data being edited
+        self.current_new_data = new_card_data.copy()
+
+        # Store original values for restore functionality
+        self.original_field_values = new_card_data.copy()
+
+        # Stores ALL QLineEdit instances, keyed by field_name, as a list
+        # Example: {'Front': [QLineEdit@tab1, QLineEdit@tab2, ...]}
+        self.field_widgets: dict[str, list[QLineEdit]] = {}
+
+        self.duplicate_notes: list[Note] = [
+            mw.col.get_note(nid) for nid in duplicate_nids if mw.col.get_note(nid)
+        ]
+
         self._setup_ui()
 
     def _setup_ui(self):
-        self.setWindowTitle("Review and Edit Notes (Zikaria)")
-        self.resize(1000, 700)  # Adjusted size
+        main_layout = QVBoxLayout(self)
+        self.resize(1200, 800)
 
-        self.main_layout = QVBoxLayout(self)
+        # Tab Widget for Duplicates
+        self.tab_widget = QTabWidget(self)
+
+        if not self.duplicate_notes:
+            main_layout.addWidget(QLabel("Error: Could not load any duplicate notes."))
+            return
+
+        # Create a comparison tab for each duplicate
+        for i, dupe_note in enumerate(self.duplicate_notes):
+            dupe_tab_name = f"Dupe Note {i+1} (ID: {dupe_note.id})"
+            tab_widget = self._create_comparison_tab(dupe_note)
+            self.tab_widget.addTab(tab_widget, dupe_tab_name)
+
+        main_layout.addWidget(self.tab_widget)
+
+        # Dialog Buttons
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        main_layout.addWidget(buttons)
+
+    def _create_comparison_tab(self, dupe_note: Note) -> QWidget:
+        """Creates a widget for comparing the new card against a single duplicate."""
+        tab_widget = QWidget()
+        tab_layout = QVBoxLayout(tab_widget)
+
+        comparison_group = QGroupBox("Field Comparison")
+        comparison_layout = QGridLayout(comparison_group)
+
+        # Headers
+        comparison_layout.addWidget(QLabel("<b>F-Action</b>"), 0, 0)
+        comparison_layout.addWidget(QLabel("<b>Field</b>"), 0, 1)
+        comparison_layout.addWidget(QLabel("<b>New Card Value (Editable)</b>"), 0, 2)
+        comparison_layout.addWidget(QLabel("<b>Duplicate Value</b>"), 0, 3)
+        comparison_layout.addWidget(QLabel("<b>D-Action</b>"), 0, 4)
+
+        # Fields
+        for row, field_def in enumerate(self.new_note_template.note_type()["flds"]):
+            field_name = field_def["name"]
+
+            # --- New Card Field (Editable) ---
+            # 1. Create a NEW QLineEdit instance for this specific tab
+            new_value = self.current_new_data.get(field_name, "")
+            new_edit = QLineEdit(new_value)
+            new_edit.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            )
+
+            # 2. Store the widget instance in the dictionary for synchronization
+            self.field_widgets.setdefault(field_name, []).append(new_edit)
+
+            # 3. Connect the signal to the synchronization slot
+            new_edit.textEdited.connect(
+                # Use default args to pass the field name correctly to the slot
+                lambda text, name=field_name: self._update_field_value(name, text)
+            )
+
+            # --- Duplicate Field (Read Only) ---
+            dupe_value = dupe_note.fields[field_def["ord"]]
+            dupe_edit = QLineEdit(dupe_value)
+            dupe_edit.setReadOnly(True)
+            if theme_manager.night_mode:
+                dupe_edit.setStyleSheet("background-color: #0a0a0a;")
+            else:
+                dupe_edit.setStyleSheet("background-color: #f0f0f0;")
+
+            dupe_edit.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            )
+
+            # --- Action Buttons Container ---
+            # 1. Create the container widget and its layout
+            f_action_widget = QWidget()
+            f_action_layout = QHBoxLayout(f_action_widget)
+            f_action_layout.setContentsMargins(
+                0, 0, 0, 0
+            )  # Remove margin/spacing around buttons
+            f_action_layout.setSpacing(5)  # Set a small spacing between the buttons
+
+            # "Restore" Button
+            restore_btn = QPushButton("Restore")
+            restore_btn.clicked.connect(
+                lambda _, n=field_name, v=self.original_field_values[
+                    field_name
+                ]: self._update_field_value(n, v)
+            )
+
+            # "Selte" Button
+            clear_btn = QPushButton("Clear")
+            clear_btn.clicked.connect(
+                lambda _, n=field_name, v="": self._update_field_value(n, v)
+            )
+
+            f_action_layout.addWidget(restore_btn)
+            f_action_layout.addWidget(clear_btn)
+
+            # --- Action Buttons Container ---
+            # 1. Create the container widget and its layout
+            d_action_widget = QWidget()
+            d_action_layout = QHBoxLayout(d_action_widget)
+            d_action_layout.setContentsMargins(
+                0, 0, 0, 0
+            )  # Remove margin/spacing around buttons
+            d_action_layout.setSpacing(5)  # Set a small spacing between the buttons
+
+            # "Copy" Button
+            copy_btn = QPushButton("Copy Dupe")
+            # Connect the button to update the central data and ALL widgets
+            copy_btn.clicked.connect(
+                lambda _, n=field_name, v=dupe_value: self._update_field_value(n, v)
+            )
+
+            # "Copy" Button
+            append_btn = QPushButton("Append Dupe")
+            # Connect the button to update the central data and ALL widgets
+            append_btn.clicked.connect(
+                lambda _, n=field_name, v=dupe_value: self._append_field_value(n, v)
+            )
+
+            # Add buttons to the inner layout
+            d_action_layout.addWidget(copy_btn)
+            d_action_layout.addWidget(append_btn)
+
+            # Add to layout
+            comparison_layout.addWidget(f_action_widget, row + 1, 0)
+            comparison_layout.addWidget(QLabel(f"<b>{field_name}</b>"), row + 1, 1)
+            comparison_layout.addWidget(new_edit, row + 1, 2)
+            comparison_layout.addWidget(dupe_edit, row + 1, 3)
+            comparison_layout.addWidget(d_action_widget, row + 1, 4)
+
+        tab_layout.addWidget(comparison_group)
+
+        # Bulk Actions
+        bulk_layout = QHBoxLayout()
+
+        restore_all_btn = QPushButton(f"Restore All")
+        restore_all_btn.clicked.connect(lambda: self._restore_all())
+        bulk_layout.addWidget(restore_all_btn)
+
+        overwrite_all_btn = QPushButton(f"Overwrite All Fields from Dupe")
+        overwrite_all_btn.clicked.connect(lambda: self._copy_all_from_dupe(dupe_note))
+        bulk_layout.addWidget(overwrite_all_btn)
+
+        copy_nonempty_btn = QPushButton(f"Copy Non-Empty Fields from Dupe")
+        copy_nonempty_btn.clicked.connect(
+            lambda: self._copy_nonempty_from_dupe(dupe_note)
+        )
+        bulk_layout.addWidget(copy_nonempty_btn)
+
+        open_dupe_btn = QPushButton(f"Open Dupe in Browser")
+        open_dupe_btn.clicked.connect(lambda: self._open_dupe_in_browser(dupe_note.id))
+        bulk_layout.addWidget(open_dupe_btn)
+
+        tab_layout.addLayout(bulk_layout)
+        tab_layout.addStretch(1)
+
+        return tab_widget
+
+    def _append_field_value(self, field_name: str, new_value: str) -> None:
+        """Appends to a field, updates the central data store and synchronizes all widgets for a field."""
+
+        # 1. Update the central data store
+        old_value = self.current_new_data[field_name]
+        new_value = "".join([old_value, new_value])
+        self.current_new_data[field_name] = new_value
+
+        # 2. Synchronize all QLineEdits for this field name
+        # We temporarily block signals to prevent an infinite loop (A updates B, B updates A, etc.)
+        if field_name in self.field_widgets:
+            for widget in self.field_widgets[field_name]:
+                if widget.text() != new_value:  # Only update if necessary
+                    widget.blockSignals(True)
+                    widget.setText(new_value)
+                    widget.blockSignals(False)
+
+    def _restore_all(self):
+        for field_def in self.new_note_template.note_type()["flds"]:
+            field_name = field_def["name"]
+            original_value = self.original_field_values[field_name]
+
+            # Use the synchronized method to update all fields
+            self._update_field_value(field_name, original_value)
+
+    def _update_field_value(self, field_name: str, new_value: str) -> None:
+        """Updates the central data store and synchronizes all widgets for a field."""
+
+        # 1. Update the central data store
+        self.current_new_data[field_name] = new_value
+
+        # 2. Synchronize all QLineEdits for this field name
+        # We temporarily block signals to prevent an infinite loop (A updates B, B updates A, etc.)
+        if field_name in self.field_widgets:
+            for widget in self.field_widgets[field_name]:
+                if widget.text() != new_value:  # Only update if necessary
+                    widget.blockSignals(True)
+                    widget.setText(new_value)
+                    widget.blockSignals(False)
+
+    def _copy_all_from_dupe(self, dupe_note: Note) -> None:
+        """Copies all field values from the selected duplicate by updating the central store."""
+        for field_def in self.new_note_template.note_type()["flds"]:
+            field_name = field_def["name"]
+            dupe_value = dupe_note.fields[field_def["ord"]]
+
+            # Use the synchronized method to update all fields
+            self._update_field_value(field_name, dupe_value)
+
+    def _copy_nonempty_from_dupe(self, dupe_note: Note) -> None:
+        """Copies only non-empty field values from the duplicate to the new card."""
+        for field_def in self.new_note_template.note_type()["flds"]:
+            field_name = field_def["name"]
+            dupe_value = dupe_note.fields[field_def["ord"]]
+            if dupe_value:
+                self._update_field_value(field_name, dupe_value)
+
+    def _open_dupe_in_browser(self, dupe_nid: int) -> None:
+        """Opens the Anki Browser filtered to the specific duplicate Note ID."""
+        aqt.dialogs.open("Browser", mw, search=f"nid:{dupe_nid}")
+
+    def get_resolved_data(self) -> dict[str, Any]:
+        """Collects the final data from the central, authoritative data store."""
+        return self.current_new_data
+
+
+class ConfirmationDialog(QDialog):
+    def __init__(
+        self,
+        notes_data_map: dict[Note, list[dict[str, Any]]],
+        parent: QWidget | None = None,
+        global_tags: list[str] | None = None,
+    ):
+        super().__init__(parent or mw)
+        self.setWindowTitle("Confirm New Cards")
+        self.resize(1200, 800)
+
+        total_cards = sum(len(data_list) for data_list in notes_data_map.values())
+        self.selected_cards_flags = [True] * total_cards
+
+        # Global Card Index -> List of Dupe NIDs (int)
+        self.duplicate_nids_map: dict[int, list[int]] = {}
+        # (Note, Data, Frame, G-Index) for async check setup
+        self.widgets_to_check: list[tuple[Note, dict[str, Any], QWidget, int]] = []
+
+        self.setStyleSheet("QWidget { font-size: 16px; }")
+        self.main_layout = QVBoxLayout()
+        self.setLayout(self.main_layout)
 
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         scroll_content_widget = QWidget()
-        scroll_layout = QVBoxLayout(scroll_content_widget)
+        scroll_layout = QVBoxLayout()
+        scroll_content_widget.setLayout(scroll_layout)
 
-        self.note_editors = (
-            []
-        )  # List to store (checkbox, field_widgets_map, tag_edit_widget, original_note_data)
+        # (CheckBox, FieldsMap, NoteTemplate, TagEdit, DupeButton)
+        self.card_widgets_list_internal: list[
+            tuple[QCheckBox, dict[str, QLineEdit], Note, TagEdit, QPushButton]
+        ] = []
 
-        for idx, note_data in enumerate(self.notes_data_list):
-            note_frame = QFrame()
-            note_frame.setFrameShape(
-                QFrame.Shape.StyledPanel
-            )  # Add some visual separation
-            note_layout = QVBoxLayout(note_frame)
+        card_global_idx = 0
 
-            # Header for the note (e.g., Note 1, Note Type, Deck)
-            header_label_text = f"Note {idx + 1}"
-            if note_data.note_type_id:
-                nt_model = self.mw_instance.col.models.get(
-                    NotetypeId(note_data.note_type_id)
+        for note_template, card_data_list_item in notes_data_map.items():
+            for card_data_item_dict in card_data_list_item:
+                card_frame = QFrame()
+                # card_frame.setStyleSheet("border: 1px solid gray;") # Default border
+                card_layout = QVBoxLayout()
+                header_layout = QHBoxLayout()
+                card_checkbox = QCheckBox(f"Card {card_global_idx + 1}")
+                card_checkbox.setChecked(True)
+                card_checkbox.stateChanged.connect(
+                    lambda state, idx=card_global_idx: self.toggle_card_selection(
+                        idx, state
+                    )
                 )
-                if nt_model:
-                    header_label_text += f" (Type: {nt_model['name']})"
-            if note_data.deck_id:
-                dk_model = self.mw_instance.col.decks.get(DeckId(note_data.deck_id))
-                if dk_model:
-                    header_label_text += f" [Deck: {dk_model['name']}]"
+                header_layout.addWidget(card_checkbox)
 
-            header_label = QLabel(header_label_text)
-            header_label.setStyleSheet("font-weight: bold;")
-            note_layout.addWidget(header_label)
-
-            checkbox = QCheckBox("Include this note")
-            checkbox.setChecked(True)
-            note_layout.addWidget(checkbox)
-
-            fields_group_box = QWidget()  # Using a QWidget as a container
-            fields_layout = QFormLayout(fields_group_box)
-            field_widgets = {}
-
-            for field_name, field_value in note_data.fields.items():
-                field_label = QLabel(f"{field_name}:")
-                field_edit = QLineEdit(
-                    str(field_value) if field_value is not None else ""
+                # Duplicate Resolution Button
+                resolve_dupe_btn = QPushButton("Checking Duplicates...")
+                resolve_dupe_btn.setToolTip(
+                    "Opens a dialog to resolve field-level conflicts."
                 )
-                fields_layout.addRow(field_label, field_edit)
-                field_widgets[field_name] = field_edit
-            note_layout.addWidget(fields_group_box)
+                resolve_dupe_btn.setEnabled(False)
+                resolve_dupe_btn.clicked.connect(
+                    lambda _, idx=card_global_idx: self._show_resolve_dialog(idx)
+                )
+                header_layout.addWidget(resolve_dupe_btn)
 
-            tags_label = QLabel("Tags:")
-            tag_edit_widget = TagEdit(self)  # Parent is the dialog
-            if (
-                tag_edit_widget.col != self.mw_instance.col
-            ):  # Important for correct tag handling
-                tag_edit_widget.setCol(self.mw_instance.col)
-            tag_edit_widget.setText(
-                self.mw_instance.col.tags.join(note_data.tags or [])
-            )
+                card_layout.addLayout(header_layout)
 
-            tags_layout = QHBoxLayout()
-            tags_layout.addWidget(tags_label)
-            tags_layout.addWidget(tag_edit_widget)
-            note_layout.addLayout(tags_layout)
+                field_widgets_map: dict[str, QLineEdit] = {}
+                note_type_model = note_template.note_type()
+                if not note_type_model:
+                    logger.error("ConfirmationDialog: Note template has no model.")
+                    continue
 
-            scroll_layout.addWidget(note_frame)
-            self.note_editors.append(
-                (checkbox, field_widgets, tag_edit_widget, note_data)
-            )
+                present_keys: set[str] = set()
+                temp_note = Note(mw.col, note_template.mid)
+
+                for field_def in note_type_model["flds"]:
+                    field_name = field_def["name"]
+                    value_str = card_data_item_dict.get(field_name, "")
+                    if field_name in card_data_item_dict:
+                        present_keys.add(field_name)
+
+                    field_layout = QHBoxLayout()
+                    field_label = QLabel(f"{field_name}:")
+                    field_edit = QLineEdit(
+                        str(value_str) if value_str is not None else ""
+                    )
+                    field_layout.addWidget(field_label)
+                    field_layout.addWidget(field_edit)
+                    card_layout.addLayout(field_layout)
+                    field_widgets_map[field_name] = field_edit
+
+                    # Populate temp_note for async check
+                    temp_note.fields[field_def["ord"]] = field_edit.text()
+
+                tags_list = card_data_item_dict.get("tags", [])
+                if "tags" in card_data_item_dict:
+                    present_keys.add("tags")
+
+                unused_data_keys = [
+                    key for key in card_data_item_dict if key not in present_keys
+                ]
+                if unused_data_keys:
+                    rest_layout = QHBoxLayout()
+                    rest_label = QLabel("Unused data:")
+                    rest_edit = QLineEdit(
+                        json.dumps(
+                            {key: card_data_item_dict[key] for key in unused_data_keys}
+                        )
+                    )
+                    rest_edit.setReadOnly(True)
+                    rest_layout.addWidget(rest_label)
+                    rest_layout.addWidget(rest_edit)
+                    card_layout.addLayout(rest_layout)
+
+                card_tag_edit_widget = self._get_card_tag_edit(tags_list, card_layout)
+
+                self.card_widgets_list_internal.append(
+                    (
+                        card_checkbox,
+                        field_widgets_map,
+                        note_template,
+                        card_tag_edit_widget,
+                        resolve_dupe_btn,
+                    )
+                )
+
+                # Prepare for async check
+                self.widgets_to_check.append(
+                    (temp_note, card_data_item_dict, card_frame, card_global_idx)
+                )
+
+                card_frame.setLayout(card_layout)
+                scroll_layout.addWidget(card_frame)
+                card_global_idx += 1
+
+        # Add functionality for duplicate checking on text change
+        self._first_field_timers = {}  # global_idx -> QTimer
+
+        for idx, (
+            _,
+            field_widgets_map,
+            note_template,
+            _,
+            resolve_dupe_btn,
+        ) in enumerate(self.card_widgets_list_internal):
+            # Get the first field QLineEdit
+            first_field_name = next(iter(field_widgets_map))
+            first_field_edit = field_widgets_map[first_field_name]
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(500)  # 500ms debounce
+            timer.timeout.connect(lambda idx=idx: self._check_dupe_for_card(idx))
+            self._first_field_timers[idx] = timer
+
+            def on_first_field_changed(text, idx=idx):
+                self._first_field_timers[idx].start()
+
+            first_field_edit.textChanged.connect(on_first_field_changed)
 
         scroll_area.setWidget(scroll_content_widget)
         self.main_layout.addWidget(scroll_area)
 
-        # Dialog buttons
-        self.button_box = QDialogButtonBox(
+        bulk_action_layout = QHBoxLayout()
+        select_all_button = QPushButton("Select All")
+        select_all_button.clicked.connect(self.select_all_cards)
+        bulk_action_layout.addWidget(select_all_button)
+        deselect_all_button = QPushButton("Select None")
+        deselect_all_button.clicked.connect(self.deselect_all_cards)
+        bulk_action_layout.addWidget(deselect_all_button)
+        invert_selection_button = QPushButton("Invert Selection")
+        invert_selection_button.clicked.connect(self.invert_card_selection)
+        bulk_action_layout.addWidget(invert_selection_button)
+
+        remove_all_tags_button = QPushButton("Remove All Tags")
+        remove_all_tags_button.setToolTip(
+            "Remove all tags from all cards (does not affect global tags)"
+        )
+        remove_all_tags_button.clicked.connect(self.remove_all_card_tags)
+        bulk_action_layout.addWidget(remove_all_tags_button)
+
+        self.main_layout.addLayout(bulk_action_layout)
+
+        self._setup_global_tag_edit(global_tags or [])
+
+        buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        self.button_box.accepted.connect(self.on_accept)
-        self.button_box.rejected.connect(self.reject)  # QDialog's reject
-        self.main_layout.addWidget(self.button_box)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        self.main_layout.addWidget(buttons)
 
-    def on_accept(self):
-        self.logger.debug("ReviewAndEditNotesDialog: on_accept called.")
-        self.edited_notes_data = []  # Clear previous attempts if any
-        for (
-            checkbox,
-            field_widgets_map,
-            tag_edit_widget,
-            original_note_data,
-        ) in self.note_editors:
-            if checkbox.isChecked():
-                updated_fields = {
-                    name: qlineedit.text()
-                    for name, qlineedit in field_widgets_map.items()
-                }
-                updated_tags = self.mw_instance.col.tags.split(tag_edit_widget.text())
+        # Start the async check
+        self._check_dupes_on_open()
 
-                # Create new NoteData, preserving original note_type_id and deck_id
-                # as this dialog is for content review, not structural changes.
-                new_note_data_entry = NoteData(
-                    note_type_id=original_note_data.note_type_id,
-                    deck_id=original_note_data.deck_id,
-                    fields=updated_fields,
-                    tags=updated_tags,
+    def _setup_global_tag_edit(self, global_tags_list: list[str]) -> None:
+        tag_edit_frame = QWidget(self)
+        tag_edit_frame.setStyleSheet("border: 0")
+        tag_edit_layout = QGridLayout()
+        tag_edit_layout.setSpacing(12)
+        tag_edit_layout.setContentsMargins(2, 6, 2, 6)
+        tag_edit_label = QLabel(tr.editing_tags())
+        tag_edit_layout.addWidget(tag_edit_label, 1, 0)
+        self.global_tag_edit_widget_internal = TagEdit(self)
+        self.global_tag_edit_widget_internal.setToolTip(
+            shortcut(tr.editing_jump_to_tags_with_ctrlandshiftandt())
+        )
+        border = theme_manager.var(colors.BORDER)
+        self.global_tag_edit_widget_internal.setStyleSheet(
+            f"border: 1px solid {border}"
+        )
+        tag_edit_layout.addWidget(self.global_tag_edit_widget_internal, 1, 1)
+        tag_edit_frame.setLayout(tag_edit_layout)
+        self.main_layout.addWidget(tag_edit_frame)
+        if self.global_tag_edit_widget_internal.col != mw.col:
+            self.global_tag_edit_widget_internal.setCol(mw.col)
+        self.global_tag_edit_widget_internal.setText(mw.col.tags.join(global_tags_list))
+
+    def _get_card_tag_edit(
+        self, tags_list: list[str], card_layout_ref: QVBoxLayout
+    ) -> TagEdit:
+        tag_layout = QHBoxLayout()
+        tag_label = QLabel(f"{tr.editing_tags()}:")
+        tag_edit_widget = TagEdit(self)
+        tag_edit_widget.setToolTip(
+            shortcut(tr.editing_jump_to_tags_with_ctrlandshiftandt())
+        )
+        if tag_edit_widget.col != mw.col:
+            tag_edit_widget.setCol(mw.col)
+        tag_edit_widget.setText(mw.col.tags.join(tags_list))
+        tag_layout.addWidget(tag_label)
+        tag_layout.addWidget(tag_edit_widget)
+        card_layout_ref.addLayout(tag_layout)
+        return tag_edit_widget
+
+    def remove_all_card_tags(self):
+        for _, _, _, tag_edit_widget, _ in self.card_widgets_list_internal:
+            tag_edit_widget.setText("")
+
+    def _check_dupes_on_open(self) -> None:
+        """Start asynchronous duplicate checks for all cards."""
+        for temp_note, _, _, global_idx in self.widgets_to_check:
+            _, _, note_template, _, dupe_btn = self.card_widgets_list_internal[
+                global_idx
+            ]
+
+            QueryOp(
+                parent=self,
+                op=lambda _, temp_note=temp_note, note_template=note_template: get_duplicate_note_ids_by_checksum(
+                    temp_note, note_template
+                ),
+                success=lambda nids, idx=global_idx, btn=dupe_btn: self._store_nids_and_update_button(
+                    nids, idx, btn
+                ),
+            ).run_in_background()
+
+    def _check_dupe_for_card(self, global_idx: int) -> None:
+        temp_note, _, _, _ = self.widgets_to_check[global_idx]
+
+        # Update temp_note's first field to current value
+        field_widgets_map = self.card_widgets_list_internal[global_idx][1]
+        note_template = self.card_widgets_list_internal[global_idx][2]
+        dupe_btn = self.card_widgets_list_internal[global_idx][4]
+        first_field_name = next(iter(field_widgets_map))
+        first_field_edit = field_widgets_map[first_field_name]
+
+        # Update temp_note's first field
+        note_type_model = note_template.note_type()
+
+        if not note_type_model:
+            return
+
+        first_field_ord = note_type_model["flds"][0]["ord"]
+        temp_note.fields[first_field_ord] = first_field_edit.text()
+        QueryOp(
+            parent=self,
+            op=lambda _: get_duplicate_note_ids_by_checksum(temp_note, note_template),
+            success=lambda nids, idx=global_idx, btn=dupe_btn: self._store_nids_and_update_button(
+                nids, idx, btn
+            ),
+        ).run_in_background()
+
+    def _store_nids_and_update_button(
+        self, nids: list[int], global_idx: int, dupe_btn: QPushButton
+    ) -> None:
+        """Store the found NIDs and update the button's state and text."""
+        if nids:
+            self.duplicate_nids_map[global_idx] = nids
+            dupe_btn.setStyleSheet("border: 2px solid red;")
+            dupe_btn.setText(f"Resolve Duplicate ({len(nids)})")
+            dupe_btn.setEnabled(True)
+        else:
+            # Should not happen if fields_check() returned DUPLICATE, but safe to handle
+            dupe_btn.setStyleSheet("border: 2px solid green;")
+            dupe_btn.setText("No Duplicates Found")
+            dupe_btn.setEnabled(False)
+
+    def _show_resolve_dialog(self, global_idx: int) -> None:
+        """Opens the comparison dialog for a specific card."""
+        dupe_nids = self.duplicate_nids_map.get(global_idx)
+        if not dupe_nids:
+            # If the button was enabled but lookup failed, offer to open browser
+            self._open_browser_to_dupes_by_first_field(global_idx)
+            return
+
+        _cb, fields_map, note_tmpl, tag_edit_w, dupe_btn = (
+            self.card_widgets_list_internal[global_idx]
+        )
+
+        # Reconstruct the current card data from the QLineEdits
+        current_card_data: dict[str, Any] = {
+            field_name: widget.text() for field_name, widget in fields_map.items()
+        }
+        current_card_data["tags"] = mw.col.tags.split(tag_edit_w.text())
+
+        # Open the new resolution dialog
+        resolution_dialog = DuplicateResolutionDialog(
+            new_card_data=current_card_data,
+            new_note_template=note_tmpl,
+            duplicate_nids=dupe_nids,
+            parent=self,
+        )
+
+        if resolution_dialog.exec() == QDialog.DialogCode.Accepted:
+            resolved_data = resolution_dialog.get_resolved_data()
+
+            # ... (Update fields logic remains the same) ...
+            for field_name, new_value in resolved_data.items():
+                if field_name != "tags":
+                    fields_map[field_name].setText(new_value)
+
+            if "tags" in resolved_data:
+                new_tags_text = mw.col.tags.join(resolved_data["tags"])
+                tag_edit_w.setText(new_tags_text)
+
+            dupe_btn.setText("Duplicates Resolved (Manual)")
+            # dupe_btn.setEnabled(False)
+            self.card_widgets_list_internal[global_idx][4].setStyleSheet(
+                "border: 2px solid blue;"
+            )
+
+    # --- New Method for Browser Opener ---
+    def _open_browser_to_dupes_by_first_field(self, global_idx: int) -> None:
+        """Opens the Anki Browser using the official SearchNode structure."""
+        _cb, fields_map, note_tmpl, tag_edit_w, dupe_btn = (
+            self.card_widgets_list_internal[global_idx]
+        )
+
+        note_type_id = note_tmpl.note_type()["id"]
+        # The first field is always index 0 in the fields_map keys (due to iteration order)
+        first_field_value = next(iter(fields_map.values())).text()
+
+        aqt.dialogs.open(
+            "Browser",
+            mw,
+            search=(
+                SearchNode(
+                    dupe=SearchNode.Dupe(
+                        notetype_id=note_type_id,
+                        first_field=first_field_value,
+                    )
+                ),
+            ),
+        )
+
+    def toggle_card_selection(self, index: int, state: int) -> None:
+        self.selected_cards_flags[index] = Qt.CheckState(state) == Qt.CheckState.Checked
+
+    def select_all_cards(self) -> None:
+        for checkbox, *_ in self.card_widgets_list_internal:
+            checkbox.setChecked(True)
+
+    def deselect_all_cards(self) -> None:
+        for checkbox, *_ in self.card_widgets_list_internal:
+            checkbox.setChecked(False)
+
+    def invert_card_selection(self) -> None:
+        for checkbox, *_ in self.card_widgets_list_internal:
+            checkbox.setChecked(not checkbox.isChecked())
+
+    def get_confirmed_notes_data(
+        self,
+    ) -> dict[Note, list[dict[str, Any]]]:
+        global_tags_set = set(
+            mw.col.tags.split(self.global_tag_edit_widget_internal.text())
+        )
+        confirmed_map: dict[Note, list[dict[str, Any]]] = {}
+        for idx, selected_flag in enumerate(self.selected_cards_flags):
+            if selected_flag:
+                _cb, fields_map, note_tmpl, tag_edit_w, _dupe_btn = (
+                    self.card_widgets_list_internal[idx]
                 )
-                self.edited_notes_data.append(new_note_data_entry)
+                tags_set = set(mw.col.tags.split(tag_edit_w.text()))
+                tags_set.update(global_tags_set)
+                updated_data = {
+                    field_name: widget.text()
+                    for field_name, widget in fields_map.items()
+                }
+                updated_data["tags"] = list(tags_set)
+                confirmed_map.setdefault(note_tmpl, []).append(updated_data)
+        return confirmed_map
 
-        self.logger.info(
-            f"Accepted review. {len(self.edited_notes_data)} notes will be processed."
-        )
-        self.accept()  # This is QDialog.accept() which closes the dialog with Accepted code
 
+# TODO: (Maybe) Maintain optional card data and add per-note restore capabilities
+def display_notes_confirmation_dialog(
+    notes_data_map: dict[Note, list[dict[str, str | list[str]]]],
+    parent: QWidget | None = None,
+    global_tags: list[str] | None = None,
+) -> dict[Note, list[dict[str, Any]]]:
 
-# --- display_review_and_edit_notes_dialog ---
-def display_review_and_edit_notes_dialog(
-    notes_data_list: List[NoteData],
-    current_mw_ref: Optional[QMainWindow] = None,
-    parent_widget_ref: Optional[QWidget] = None,
-) -> List[NoteData]:  # Return type changed to List[NoteData]
-    effective_mw_ref = current_mw_ref or mw
-    logger = get_logger()
-
-    if not notes_data_list:
-        logger.info(
-            "display_review_and_edit_notes_dialog: No notes data provided to review."
-        )
-        return []
-
-    dialog = ReviewAndEditNotesDialog(
-        notes_data_list=notes_data_list,
-        current_mw_ref=effective_mw_ref,
-        parent=parent_widget_ref,
+    dialog = ConfirmationDialog(
+        notes_data_map=notes_data_map,
+        global_tags=global_tags,
+        parent=parent,
     )
 
     if dialog.exec() == QDialog.DialogCode.Accepted:
-        logger.debug("ReviewAndEditNotesDialog accepted. Returning edited notes.")
-        return dialog.edited_notes_data
-    else:
-        logger.debug("ReviewAndEditNotesDialog cancelled or closed without accepting.")
-        return []  # Return empty list if cancelled
+        return dialog.get_confirmed_notes_data()
+    return {}
 
 
 # --- JsonInputDialog ---
@@ -537,14 +895,12 @@ class JsonInputDialog(QDialog, ChoosersMixin):
     def __init__(
         self,
         parent: Optional[QWidget] = None,
-        current_mw_ref: Optional[QMainWindow] = None,
     ):
-        super().__init__(parent or current_mw_ref or mw)
-        self.mw_instance = current_mw_ref or mw  # Use consistent naming
+        super().__init__(parent or mw)
         self._close_event_has_cleaned_up = False
         self.setWindowTitle("Process JSON Input")
         self.resize(800, 1000)
-        # ... (rest of implementation using self.mw_instance)
+        # ... (rest of implementation using mw)
         layout = QVBoxLayout(self)
         self.json_input_area = QTextEdit(self)
         self.json_input_area.setPlaceholderText("Enter JSON list here...")
@@ -573,12 +929,10 @@ class JsonInputDialog(QDialog, ChoosersMixin):
         button_row_layout.addWidget(self.dialog_buttons)
         layout.addLayout(button_row_layout)
 
-
     def insert_json_template_handler(self):
-        logger = get_logger()
         try:
             note_type_id = self.notetype_chooser_instance.selected_notetype_id
-            note_type_model = self.mw_instance.col.models.get(note_type_id)
+            note_type_model = mw.col.models.get(note_type_id)
             field_names = [f["name"] for f in note_type_model["flds"]]
             note_template = {field: "" for field in field_names}
             note_template["tags"] = []
@@ -617,106 +971,59 @@ class JsonInputDialog(QDialog, ChoosersMixin):
         self._cleanup_choosers()
         super().closeEvent(event)
 
+type NotesDataList = list[dict[str, str | list[str]]]
 
 # --- on_process_json_triggered_action ---
-def on_process_json_triggered_action(current_mw_ref: QMainWindow):
-    logger = get_logger()
+def on_process_json_triggered_action():
     config = get_config()  # Get current config
-    dialog = JsonInputDialog(current_mw_ref=current_mw_ref)
+    dialog = JsonInputDialog()
+
+    from .core import \
+        ZikariaPrompts  # Import locally to avoid circularity at module level
+
     if dialog.exec() == QDialog.DialogCode.Accepted:
         input_data = dialog.get_input_data()
         json_text_data = input_data["json_data"]
         deck_id = input_data["deck_id"]
         note_type_id = input_data["notetype_id"]
 
-        try:
-            notes_json_list = json.loads(json_text_data)
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON input: {e}", exc_info=True)
-            showInfo("Invalid JSON provided.", parent=current_mw_ref)
-            return
+        note_type = mw.col.models.get(note_type_id)
 
-        notes_json_list = replace_nulls_with_empty_strings(notes_json_list)
-        if not is_valid_cards_data(notes_json_list):
-            logger.error(
-                f"JSON needs to be a list of dicts, was: {type(notes_json_list)}"
-            )
-            showInfo(
-                "JSON data is not in the expected format (list of dictionaries).",
-                parent=current_mw_ref,
-            )
-            return
-        if not notes_json_list:
-            logger.info("No cards found in JSON, returning.")
-            showInfo("No card data found in the JSON input.", parent=current_mw_ref)
-            return
+        core_processor = ZikariaPrompts(manual_execution=True)
 
-        json_tag_val = config.get("json_tag", "from_json")
-        note_type_model = current_mw_ref.col.models.get(note_type_id)
-        if not note_type_model:
-            logger.error(f"Could not load note type model for ID: {note_type_id}")
-            showInfo(
-                f"Error: Could not load note type for ID {note_type_id}.",
-                parent=current_mw_ref,
-            )
-            return
-        dummy_note_template = Note(current_mw_ref.col, note_type_model)
-
-        confirmed_cards_map = display_cards_confirmation_dialog(
-            cards_data_map={dummy_note_template: notes_json_list},
-            global_tags=[json_tag_val],
-            current_mw_ref=current_mw_ref,
+        notes_data: NotesDataList | None = core_processor._parse_json_into_notes_data(
+            json_string=json_text_data, note_type=note_type
         )
 
-        if not confirmed_cards_map:
-            showInfo("No cards confirmed for import.", parent=current_mw_ref)
-            return
 
-        from .core import (
-            ZikariaPrompts,
-        )  # Import locally to avoid circularity at module level
+        json_tag_val = config.get("json_tag", "from_json")
 
-        core_processor = ZikariaPrompts(mw=current_mw_ref, manual_execution=True)
-        notes_added_count = 0
-        for _note_tmpl, cards_to_add in confirmed_cards_map.items():
-            # Call add_new_notes from the core processor
-            # original_note, cards_data, deck_id=None, note_type=None, note_tag=None
-            core_processor.add_new_notes(
-                original_note=dummy_note_template,  # Used as template
-                cards_data_list=cards_to_add,
-                deck_id_override=deck_id,
-                note_type_override=note_type_model,
-                default_tags=[],  # Tags are already in cards_to_add from confirmation dialog
-            )
-            notes_added_count += len(cards_to_add)
 
-        if notes_added_count > 0:
-            showInfo(
-                f"{notes_added_count} notes added from JSON.", parent=current_mw_ref
-            )
-            logger.info(
-                f"Processed JSON input for deck ID {deck_id}, note type ID {note_type_id}. Added {notes_added_count} notes."
+        dummy_note = Note(mw.col, note_type)
+
+        def per_note_fn(original_note, notes_data_list):
+            core_processor._add_notes(
+                note_type=note_type,
+                notes_data_list=notes_data_list,
+                deck_id=deck_id,
             )
 
+        core_processor._finalize_notes(
+            notes_map={dummy_note: notes_data}, per_note_fn=per_note_fn, finished_msg="create notes", global_tags=[json_tag_val]
+        )
 
-# --- DebugDialog ---
-# --- Enhanced DebugDialog ---
+
 class DebugDialog(QDialog):
     def __init__(
         self,
         note: Note,
         parent: Optional[QWidget] = None,
-        current_mw_ref: Optional[QMainWindow] = None,
     ):
-        super().__init__(parent or current_mw_ref or mw)
-        self.mw_instance = current_mw_ref or mw
+        super().__init__(parent or mw)
         self.note = note
-        self.logger = get_logger()
         self.config = get_config()
         self.setWindowTitle("Debug Note (Zikaria)")
         self.resize(800, 1000)
-
-        from .config_utils import get_effective_config
 
         self.effective_config = get_effective_config(
             self.note.mid, self.note.cards()[0].did if self.note.cards() else None
@@ -727,14 +1034,22 @@ class DebugDialog(QDialog):
         layout.addWidget(self.tabs)
 
         self._init_schema_tab()
+        self._init_pydantic_schema_tab()
         self._init_examples_tab()
+        # --- NEW TAB INITIALIZATION ---
+        self._init_note_json_tab()
+        # ------------------------------
         self._init_create_prompt_tab()
         self._init_complete_prompt_tab()
         self._init_prompt_tab()
 
         # Initial content
         self.display_schema_handler()
+        self.display_pydantic_schema_handler()
         self.display_examples_handler()
+        # --- NEW TAB DISPLAY CALL ---
+        self.display_note_json_handler()
+        # ----------------------------
         self.display_create_prompt_handler()
         self.display_complete_prompt_handler()
         self.display_prompt_handler()
@@ -758,6 +1073,17 @@ class DebugDialog(QDialog):
         layout.addWidget(text_edit)
         return wrapper
 
+    # --- NEW METHOD: Tab Initialization ---
+    def _init_note_json_tab(self):
+        self.note_json_output_area = QTextEdit()
+        self.note_json_output_area.setReadOnly(True)
+        tab = self._add_output_area_with_controls(
+            self.note_json_output_area, self.display_note_json_handler
+        )
+        self.tabs.addTab(tab, "Note JSON")
+
+    # --------------------------------------
+
     def _init_schema_tab(self):
         self.schema_output_area = QTextEdit()
         self.schema_output_area.setReadOnly(True)
@@ -765,6 +1091,14 @@ class DebugDialog(QDialog):
             self.schema_output_area, self.display_schema_handler
         )
         self.tabs.addTab(tab, "Schema")
+
+    def _init_pydantic_schema_tab(self):
+        self.pydantic_schema_output_area = QTextEdit()
+        self.pydantic_schema_output_area.setReadOnly(True)
+        tab = self._add_output_area_with_controls(
+            self.pydantic_schema_output_area, self.display_pydantic_schema_handler
+        )
+        self.tabs.addTab(tab, "Pydantic Schema")
 
     def _init_create_prompt_tab(self):
         self.create_prompt_output_area = QTextEdit()
@@ -837,7 +1171,7 @@ class DebugDialog(QDialog):
 
         self.prompt_template_combo_widget = QWidget(self)
         self.prompt_template_chooser_instance = PromptTemplateChooser(
-            mw=self.mw_instance,
+            mw=mw,
             widget=self.prompt_template_combo_widget,
             # starting_prompt = None,
             # note_type_id = self.note.note_type().id,
@@ -908,13 +1242,13 @@ class DebugDialog(QDialog):
         QApplication.clipboard().setText(text_edit.toPlainText())
 
     def display_schema_handler(self):
-        self.logger.debug("DebugDialog: Displaying schema.")
+        logger.debug("DebugDialog: Displaying schema.")
         note_model = self.note.note_type()
         if not note_model:
             self.schema_output_area.setPlainText(
                 "Error: Note has no model (note type)."
             )
-            self.logger.error("DebugDialog: Note has no model (note type).")
+            logger.error("DebugDialog: Note has no model (note type).")
             return
         try:
             schema = generate_schema_class(note_model)
@@ -923,12 +1257,46 @@ class DebugDialog(QDialog):
             )
         except Exception as e:
             self.schema_output_area.setPlainText(f"Error generating schema: {e}")
-            self.logger.exception("DebugDialog: Error generating schema.")
+            logger.exception("DebugDialog: Error generating schema.")
 
-    def get_prompt_args(self, mode: str) -> dict:
+    def display_pydantic_schema_handler(self):
+        logger.debug("DebugDialog: Displaying pydantic schema.")
+        note_model = self.note.note_type()
+        if not note_model:
+            self.schema_output_area.setPlainText(
+                "Error: Note has no model (note type)."
+            )
+            logger.error("DebugDialog: Note has no model (note type).")
+            return
+        try:
+            pydantic_schema = generate_pydantic_class(note_model)
+            self.pydantic_schema_output_area.setPlainText(
+                json.dumps(
+                    pydantic_schema.model_json_schema(), indent=2, ensure_ascii=False
+                )
+            )
+        except Exception as e:
+            self.pydantic_schema_output_area.setPlainText(
+                f"Error generating pydantic schema: {e}"
+            )
+            logger.exception("DebugDialog: Error generating pydantic schema.")
+
+    # --- NEW METHOD: Display Note JSON ---
+    def display_note_json_handler(self):
+        logger.debug("DebugDialog: Displaying note JSON.")
+        try:
+            # Assuming note_to_json is imported at the top-level as requested
+            json_str = note_to_json_string(self.note)
+            self.note_json_output_area.setPlainText(json_str)
+        except Exception as e:
+            self.note_json_output_area.setPlainText(f"Error generating note JSON: {e}")
+            logger.exception("DebugDialog: Error generating note JSON.")
+
+    # --------------------------------------
+
+    def generate_get_prompt_text_args(self, mode: str) -> dict:
         kwargs = {"dummy_keys": set()}
         temporary_config = deepcopy(self.effective_config)
-        base_prompt = temporary_config.get(f"{mode}_prompt", "")
 
         if not getattr(self, f"include_schema_{mode}").isChecked():
             kwargs["dummy_keys"].add("schema")
@@ -936,40 +1304,45 @@ class DebugDialog(QDialog):
         if not getattr(self, f"include_examples_{mode}").isChecked():
             kwargs["dummy_keys"].add("examples")
 
-        temporary_config[f"{mode}_prompt"] = base_prompt
-        kwargs["current_config"] = temporary_config
+        kwargs["config_"] = temporary_config
         return kwargs
 
     def display_create_prompt_handler(self):
-        self.logger.debug("DebugDialog: Displaying create prompt.")
+        logger.debug("DebugDialog: Displaying create prompt.")
 
         try:
-            prompt = get_create_prompt(self.note, **self.get_prompt_args("create"))
+            prompt = get_prompt_text_by_mode(note=self.note, mode="create", **self.generate_get_prompt_text_args("create"))
             self.create_prompt_output_area.setPlainText(prompt)
         except Exception as e:
             self.create_prompt_output_area.setPlainText(
                 f"Error generating create prompt: {e}"
             )
-            self.logger.exception("DebugDialog: Error generating create prompt.")
+            logger.exception("DebugDialog: Error generating create prompt.")
 
     def display_complete_prompt_handler(self):
-        self.logger.debug("DebugDialog: Displaying complete prompt.")
+        logger.debug("DebugDialog: Displaying complete prompt.")
 
         try:
-            prompt = get_complete_prompt(self.note, **self.get_prompt_args("complete"))
+            prompt = get_prompt_text_by_mode(note=self.note, mode="complete", **self.generate_get_prompt_text_args("complete"))
             self.complete_prompt_output_area.setPlainText(prompt)
         except Exception as e:
             self.complete_prompt_output_area.setPlainText(
                 f"Error generating complete prompt: {e}"
             )
-            self.logger.exception("DebugDialog: Error generating complete prompt.")
+            logger.exception("DebugDialog: Error generating complete prompt.")
 
     def display_prompt_handler(self):
-        self.logger.debug("DebugDialog: Displaying prompt.")
+        logger.debug("DebugDialog: Displaying prompt.")
 
-        dummy_keys = set()
+        dummy_keys : set[str] = set()
         base_prompt = self.prompt_template_chooser_instance.selected_template_text()
-        # self.logger.debug("DebugDialog: selected_template: %s", base_prompt)
+
+        if base_prompt is None:
+            self.prompt_output_area.setPlainText("Selected prompt template is empty")
+            logger.warning("Selected prompt template is empty")
+            return
+            
+        # logger.debug("DebugDialog: selected_template: %s", base_prompt)
 
         if not self.include_schema_prompt.isChecked():
             dummy_keys.add("schema")
@@ -978,28 +1351,26 @@ class DebugDialog(QDialog):
             dummy_keys.add("examples")
 
         try:
-            prompt = get_prompt(
+            prompt = get_prompt_text_from_note(
                 self.note,
                 base_prompt=base_prompt,
-                current_config=self.effective_config,
+                config_=self.effective_config,
                 dummy_keys=dummy_keys,
             )
             self.prompt_output_area.setPlainText(prompt)
         except Exception as e:
             self.prompt_output_area.setPlainText(f"Error generating prompt: {e}")
-            self.logger.exception("DebugDialog: Error generating prompt.")
+            logger.exception("DebugDialog: Error generating prompt.")
 
     def display_examples_handler(self):
-        self.logger.debug("DebugDialog: Displaying examples.")
+        logger.debug("DebugDialog: Displaying examples.")
         try:
             note_type = self.note.note_type()
             if not note_type:
                 self.examples_output_area.setPlainText(
                     "Error: Note has no model (note type) to generate examples from."
                 )
-                self.logger.error(
-                    "DebugDialog: Note has no model (note type) for examples."
-                )
+                logger.error("DebugDialog: Note has no model (note type) for examples.")
                 return
 
             n = self.example_count.value()
@@ -1007,11 +1378,11 @@ class DebugDialog(QDialog):
             self.examples_output_area.setPlainText(examples_str)
         except Exception as e:
             self.examples_output_area.setPlainText(f"Error generating examples: {e}")
-            self.logger.exception("DebugDialog: Error generating examples.")
-
+            logger.exception("DebugDialog: Error generating examples.")
 
 
 from typing import Callable, Optional
+
 
 class MyStudyDeck(StudyDeck):
     def accept(self):
@@ -1023,6 +1394,7 @@ class MyStudyDeck(StudyDeck):
         else:
             self.name = self.names[self.form.list.currentRow()]
         self.accept_with_callback()
+
 
 class PromptTemplateChooser(QHBoxLayout):
     template_changed = pyqtSignal(str)
@@ -1038,7 +1410,6 @@ class PromptTemplateChooser(QHBoxLayout):
         on_template_changed: Optional[Callable[[str], None]] = None,
     ) -> None:
         super().__init__()
-        self.logger = get_logger()
 
         self._widget = widget  # type: ignore
         self.mw = mw
@@ -1085,21 +1456,38 @@ class PromptTemplateChooser(QHBoxLayout):
 
         self._update_button_label()
 
+    def get_key_by_name(self, target_name):
+        for key, entry in self.prompt_templates.items():
+            if entry["name"] == target_name:
+                return key
+        return None
+
     def _open_template_chooser_dialog(self):
         def template_names() -> list[str]:
             return sorted(t["name"] for t in self.prompt_templates.values())
 
         def callback(ret: StudyDeck) -> None:
-            self.logger.debug("PromptTemplateChooser: study deck returned: %s", ret.form.list.currentRow())
-            template_index = ret.form.list.currentRow()
-            if template_index < 0:
+            logger.debug(
+                "PromptTemplateChooser: study deck returned:\n- row: %s\n- item: %s\n- index: %s",
+                ret.form.list.currentRow(),
+                ret.form.list.currentItem(),
+                ret.form.list.currentIndex(),
+            )
+
+            selected_item = ret.form.list.currentItem()
+
+            if selected_item is None:
                 self.selected_template = None
-
             else:
-                key = list(self.prompt_templates)[template_index]
+                key = self.get_key_by_name(selected_item.text())
 
-                self.selected_template = key, self.prompt_templates[key]
-                self.logger.debug("New key and template: %s, %s", key, self.prompt_templates[key])
+                self.set_prompt_by_key(key)
+
+                logger.debug(
+                    "New key and template: %s, %s",
+                    self.selected_template_key(),
+                    self.selected_template,
+                )
 
             self._update_button_label()
             if self.on_template_changed:
@@ -1111,15 +1499,16 @@ class PromptTemplateChooser(QHBoxLayout):
         def open_manage():
             dialog = SavedPromptManagerDialog(
                 parent=self._widget,
-                current_mw_ref=self.mw,
-                starting_index = self.study_deck.form.list.currentRow()
+                starting_index=self.study_deck.form.list.currentRow(),
                 # note_type_id=self.note_type_id,
                 # deck_id=self.deck_id,
             )
 
             dialog.exec()
             template_index = dialog.prompt_list.currentIndex()
-            self.logger.debug("Prompt manager finished with prompt index: %s", template_index)
+            logger.debug(
+                "Prompt manager finished with prompt index: %s", template_index
+            )
 
             self.prompt_templates = load_saved_prompts()
             self.refresh_template_list()
@@ -1133,10 +1522,12 @@ class PromptTemplateChooser(QHBoxLayout):
         qconnect(manage_button.clicked, open_manage)
 
         unset_button = QPushButton("Unset")
-        qconnect(unset_button.clicked, lambda: self.study_deck.form.list.setCurrentRow(-1))
+        qconnect(
+            unset_button.clicked, lambda: self.study_deck.form.list.setCurrentRow(-1)
+        )
 
         self.study_deck = MyStudyDeck(
-            mw=self.mw,
+            mw=mw,
             names=template_names,
             accept=tr.actions_choose(),
             title="Choose Prompt Template",
@@ -1203,17 +1594,14 @@ class PromptFromTextDialog(QDialog, ChoosersMixin):
 
     def __init__(
         self,
-        parent: Optional[QWidget] = None,
-        current_mw_ref: Optional[QMainWindow] = None,
+        parent: QWidget | None = None,
     ):
-        super().__init__(parent or current_mw_ref or mw)
-        self.mw_instance = current_mw_ref or mw
-        self.logger = get_logger()
+        super().__init__(parent or mw)
         self.config = get_config()
         self.setWindowTitle("Create Cards from Prompt Text (Zikaria)")
         self.resize(1000, 800)
         self.layout = QVBoxLayout(self)
-        # ... (rest of implementation using self.logger, self.config, self.mw_instance)
+        # ... (rest of implementation using logger, self.config, mw)
         # Needs access to ZikariaPrompts instance or its methods for AI call.
         # For now, we'll instantiate ZikariaPrompts locally in send_prompt_to_ai_handler.
 
@@ -1225,7 +1613,7 @@ class PromptFromTextDialog(QDialog, ChoosersMixin):
 
         self.prompt_template_combo_widget = QWidget(self)
         self.prompt_template_chooser_instance = PromptTemplateChooser(
-            mw=self.mw_instance,
+            mw=mw,
             widget=self.prompt_template_combo_widget,
             # starting_prompt = None,
             # note_type_id = self.notetype_chooser_instance.selected_notetype_id,
@@ -1259,7 +1647,7 @@ class PromptFromTextDialog(QDialog, ChoosersMixin):
         self.layout.addWidget(self.submit_ai_button)
 
         self.global_tag_edit_widget = TagEdit(self)
-        self.global_tag_edit_widget.setCol(self.mw_instance.col)
+        self.global_tag_edit_widget.setCol(mw.col)
         self.layout.addWidget(self.global_tag_edit_widget)
         if note_tag_val := self.config.get("note_tag"):  # Use self.config
             self.global_tag_edit_widget.setText(note_tag_val)
@@ -1267,162 +1655,99 @@ class PromptFromTextDialog(QDialog, ChoosersMixin):
         self.status_label = QLabel("")
         self.layout.addWidget(self.status_label)
 
-    # def select_saved_prompt_handler(self):
-    #     note_type_id = self.notetype_chooser_instance.selected_notetype_id
-    #     deck_id = self.deck_chooser_instance.selected_deck_id
-    #
-    #     dialog = SavedPromptManagerDialog(
-    #         parent=self,
-    #         current_mw_ref=self.mw_instance,
-    #         note_type_id=note_type_id,
-    #         deck_id=deck_id,
-    #     )
-    #     if dialog.exec():
-    #         selected_prompt_text = dialog.get_selected_prompt_template()
-    #         if selected_prompt_text:
-    #             self.prompt_edit_area.setPlainText(selected_prompt_text)
-    #             self.status_label.setText("Loaded saved prompt.")
-
     def generate_full_prompt_handler(self):
-        self.logger.debug("Generating full prompt in PromptFromTextDialog.")
+        logger.debug("Generating full prompt in PromptFromTextDialog.")
         note_type_id = self.notetype_chooser_instance.selected_notetype_id
-        note_model = self.mw_instance.col.models.get(note_type_id)
-        if not note_model:
-            self.status_label.setText("Error: Could not load note type.")
-            return
-
-        dummy_note = Note(self.mw_instance.col, note_model)
-        dummy_note.fields[0] = self.prompt_input_area.toPlainText()
+        note_type = mw.col.models.get(note_type_id)
 
         current_deck_id = self.deck_chooser_instance.selected_deck_id
         effective_config = get_effective_config(note_type_id, current_deck_id)
         temporary_config = deepcopy(effective_config)
 
-        selected_template = (
+        base_prompt = (
             self.prompt_template_chooser_instance.selected_template_text()
         )
-        # dialog = SavedPromptManagerDialog(
-        #     parent=self,
-        #     current_mw_ref=self.mw_instance,
-        #     note_type_id=note_type_id,
-        #     deck_id=current_deck_id,
-        # )
-        # if dialog.exec():
-        #     selected_template = dialog.get_selected_prompt_template()
-
-        if selected_template:
-            temporary_config["create_prompt"] = selected_template
+        if base_prompt is None:
+            self.prompt_output_area.setPlainText("Selected prompt template is empty")
+            logger.warning("Selected prompt template is empty")
+            return
 
         try:
-            prompt_text = get_create_prompt(
-                dummy_note,
-                temporary_config,
+            prompt_text = get_prompt_text(
+                note_type = note_type,
+                prompt = self.prompt_input_area.toPlainText(),
+                base_prompt=base_prompt,
+                config_ =temporary_config,
             )
+
             self.prompt_edit_area.setPlainText(prompt_text)
             self.status_label.setText("Prompt generated.")
         except Exception as e:
             self.status_label.setText(f"Error generating prompt: {e}")
-            self.logger.exception("Failed to generate prompt in PromptFromTextDialog")
+            logger.exception("Failed to generate prompt in PromptFromTextDialog")
 
     def send_prompt_to_ai_handler(self):
-        self.logger.debug("Sending prompt to AI from PromptFromTextDialog.")
+        from .core import ZikariaPrompts  # Local import
+
+        logger.debug("Sending prompt to AI from PromptFromTextDialog.")
         full_prompt_text = self.prompt_edit_area.toPlainText()
+
         if not full_prompt_text.strip():
             self.status_label.setText("Prompt is empty.")
-            return
-
-        self.status_label.setText("Configuring AI connection...")
-        QApplication.processEvents()
-
-        if not configure_generative_ai():  # From anki_utils
-            self.status_label.setText("Failed to configure AI connection (API key?).")
-            showInfo(
-                "Failed to configure AI. Please check your API key in the Addon Configuration.",
-                parent=self,
-            )
             return
 
         self.status_label.setText("Sending prompt to AI...")
         QApplication.processEvents()
 
-        from .core import ZikariaPrompts  # Local import
-
-        core_processor = ZikariaPrompts(mw=self.mw_instance, manual_execution=True)
+        core_processor = ZikariaPrompts(manual_execution=True)
 
         note_type_id = self.notetype_chooser_instance.selected_notetype_id
-        current_deck_id = self.deck_chooser_instance.selected_deck_id
-        from .config_utils import get_effective_config  # Local import
+        note_type = mw.col.models.get(note_type_id)
 
-        effective_config = get_effective_config(note_type_id, current_deck_id)
+        deck_id = self.deck_chooser_instance.selected_deck_id
 
-        try:
-            response = core_processor.send_prompt_to_generative_ai(
-                full_prompt_text, custom_config=effective_config
-            )
-            if not response or not response.text:
-                self.status_label.setText("No response received from AI.")
-                return
-            self.status_label.setText("Response received. Validating...")
-            QApplication.processEvents()
-        except Exception as e:
-            self.status_label.setText(f"Error from AI: {e}")
-            self.logger.exception("AI returned an error in PromptFromTextDialog")
-            return
+        global_tags = mw.col.tags.split(self.global_tag_edit_widget.text())
 
-        try:
-            cards_data_list = json.loads(response.text)
-        except json.JSONDecodeError as e:
-            self.logger.error(
-                f"Error decoding AI JSON response: {e}\n\n{response.text}",
-                exc_info=True,
-            )
-            self.status_label.setText("Error decoding AI JSON response.")
-            showInfo(
-                f"Could not understand the AI's response (not valid JSON).\nDetails: {e}\nResponse:\n{response.text[:500]}...",
-                parent=self,
-            )
-            return
+        effective_config = get_effective_config(note_type_id, deck_id)
 
-        if not is_valid_cards_data(cards_data_list):
-            self.status_label.setText("AI response is not a valid card list.")
-            showInfo("The AI's response was not a valid list of cards.", parent=self)
-            return
-
-        note_model = self.mw_instance.col.models.get(
-            self.notetype_chooser_instance.selected_notetype_id
+        # 1. Send prompt
+        response = core_processor._send_prompt_to_ai(
+            full_prompt_text, custom_config=effective_config, note_type=note_type
         )
-        if not note_model:
-            self.status_label.setText("Error: Selected note type not found.")
-            return
-        dummy_note_template = Note(self.mw_instance.col, note_model)
-        global_tags_list = self.mw_instance.col.tags.split(
-            self.global_tag_edit_widget.text()
+        # 2. Parse and validate response
+        notes_data : NotesDataList | None = core_processor._parse_response_into_notes_data(
+            response, note_type=note_type
         )
 
-        confirmed_cards_map = display_cards_confirmation_dialog(
-            cards_data_map={dummy_note_template: cards_data_list},
-            global_tags=global_tags_list,
-            current_mw_ref=self.mw_instance,
-            parent=self,
-        )
-
-        if not confirmed_cards_map:
-            self.status_label.setText("No cards confirmed for import.")
+        if not notes_data:
+            logger.debug("Response parsing returned no notes data.")
+            self.status_label.setText("Response parsing returned no notes data.")
             return
 
-        notes_added_count = 0
-        for _template, cards_to_add in confirmed_cards_map.items():
-            core_processor.add_new_notes(  # Use core_processor instance
-                original_note=dummy_note_template,
-                cards_data_list=cards_to_add,
-                deck_id_override=self.deck_chooser_instance.selected_deck_id,
-                note_type_override=note_model,
-                default_tags=[],
-            )
-            notes_added_count += len(cards_to_add)
+        dummy_note = Note(mw.col, note_type)
 
-        self.status_label.setText(f"{notes_added_count} cards added successfully.")
-        tooltip(f"{notes_added_count} cards added.", parent=self.mw_instance)
+        added_notes = []
+
+        def per_note_fn(original_note, notes_data_list):
+            added_notes.extend(notes_data_list)
+            core_processor._add_notes(
+                note_type=note_type,
+                notes_data_list=notes_data_list,
+                default_tags=global_tags,
+                deck_id=deck_id,
+            )
+
+        core_processor._finalize_notes(
+            notes_map={dummy_note: notes_data}, per_note_fn=per_note_fn, finished_msg="create notes", global_tags=global_tags
+        )
+
+        if added_notes:
+            self.status_label.setText(f"{len(notes_data)} notes added successfully.")
+            tooltip(f"{len(notes_data)} notes added successfully.")
+            return 
+
+        self.status_label.setText(f"No notes were added.")
+        tooltip(f"No notes were added.")
 
     def closeEvent(self, event):
         if (
@@ -1439,49 +1764,24 @@ class PromptFromTextDialog(QDialog, ChoosersMixin):
 class SavedPromptManagerDialog(QDialog, ChoosersMixin):
     def __init__(
         self,
-        parent: Optional[QWidget] = None,
-        current_mw_ref: QMainWindow | None = None,
-        starting_index: int | None = None
-        # note_type_id: Optional[int] = None,
-        # deck_id: Optional[int] = None,
+        parent: QWidget | None = None,
+        starting_index: int | None = None,
     ):
         super().__init__(parent)
-        self.mw_instance = current_mw_ref or mw  # Use consistent naming
         self.setWindowTitle("Manage Saved Prompts")
         self.resize(900, 500)
 
-        # self.note_type_id = note_type_id
-        # self.deck_id = deck_id
         self.prompt_templates = load_saved_prompts()
         self.selected_prompt = None
+        # Flag to track unsaved edits in the text area
+        self.is_edited = False
 
         # Layouts
         main_layout = QHBoxLayout(self)
         left_col = QVBoxLayout()
         right_col = QVBoxLayout()
-        # right_col = QVBoxLayout()
         main_layout.addLayout(left_col, 4)
         main_layout.addLayout(right_col, 1)
-
-        # Choosers
-        # self.note_type_combo_widget = QWidget(self)
-        # self.deck_combo_widget = QWidget(self)
-        # self._setup_choosers(
-        #     self.note_type_id,
-        #     self.deck_id,
-        #     on_notetype_changed=self.on_chooser_change,
-        #     on_deck_changed=self.on_chooser_change,
-        # )
-        # top_layout = QHBoxLayout()
-        # top_layout.addWidget(self.note_type_combo_widget)
-        # top_layout.addWidget(self.deck_combo_widget)
-        # center_col.addLayout(top_layout)
-
-        # Show All Checkbox
-        # self.show_all_checkbox = QCheckBox("Show all prompts")
-        # self.show_all_checkbox.setChecked(False)
-        # self.show_all_checkbox.stateChanged.connect(self.refresh_prompt_list)
-        # left_col.addWidget(self.show_all_checkbox)
 
         # Prompt List
         self.prompt_list = QComboBox()
@@ -1515,10 +1815,13 @@ class SavedPromptManagerDialog(QDialog, ChoosersMixin):
         # Prompt Editor
         self.preview_area = QTextEdit()
         self.preview_area.setReadOnly(True)
+        # Connect text change to update the is_edited state and button
+        self.preview_area.textChanged.connect(self._on_editor_text_changed)
         left_col.addWidget(self.preview_area)
 
         self.save_edit_button = QPushButton("Save")
         self.save_edit_button.setVisible(False)
+        self.save_edit_button.setEnabled(False)  # Start disabled
         self.save_edit_button.clicked.connect(self.save_edited_prompt)
         left_col.addWidget(self.save_edit_button)
 
@@ -1528,10 +1831,23 @@ class SavedPromptManagerDialog(QDialog, ChoosersMixin):
             self.prompt_list.setCurrentIndex(starting_index)
             self.update_preview()
 
-    # def on_chooser_change(self, *__):
-    #     self.note_type_id = self.notetype_chooser_instance.selected_notetype_id
-    #     self.deck_id = self.deck_chooser_instance.selected_deck_id
-    #     self.refresh_prompt_list()
+    def _on_editor_text_changed(self):
+        """Updates the is_edited flag and save button's enabled state."""
+        # Only check if the editor is NOT read-only (i.e., in edit mode)
+        if not self.preview_area.isReadOnly():
+            current_text = self.preview_area.toPlainText().strip()
+            # Retrieve the original text from the stored data
+            original_text = (
+                self.selected_prompt[1]["template"].strip()
+                if self.selected_prompt
+                else ""
+            )
+
+            # Update the is_edited flag
+            self.is_edited = current_text != original_text
+
+            # Enable the Save button only if the text has been edited
+            self.save_edit_button.setEnabled(self.is_edited)
 
     def refresh_prompt_list(self):
         self.prompt_list.clear()
@@ -1551,39 +1867,51 @@ class SavedPromptManagerDialog(QDialog, ChoosersMixin):
 
         self.preview_area.setPlainText(template)
 
+        # Reset editor to read-only state
         self.preview_area.setReadOnly(True)
         self.save_edit_button.setVisible(False)
+        self.save_edit_button.setEnabled(False)
+        self.is_edited = False  # No edits upon viewing a new/existing template
 
     def set_current_prompt_by_key(self, target_key):
         for index in range(self.prompt_list.count()):
             user_data = self.prompt_list.itemData(index)
             if user_data and user_data[0] == target_key:
                 self.prompt_list.setCurrentIndex(index)
-                return  # Stop after finding the first match
+                return
 
     def enter_edit_mode(self):
         if not self.selected_prompt:
             return
+
         self.preview_area.setReadOnly(False)
         self.save_edit_button.setVisible(True)
+        # Check if the text is already edited (e.g. if entering edit mode for a new prompt)
+        self._on_editor_text_changed()
 
     def save_edited_prompt(self):
         new_text = self.preview_area.toPlainText().strip()
         if not new_text:
+            # showInfo is likely an Anki utility function you'd use here
             return
+
+        # Update the selected prompt's template
         self.selected_prompt[1]["template"] = new_text
 
+        # Save to disk
         save_saved_prompts(self.prompt_templates)
+
+        # Reset editor state after saving
         self.preview_area.setReadOnly(True)
         self.save_edit_button.setVisible(False)
+        self.save_edit_button.setEnabled(False)
+        self.is_edited = False
 
     def add_prompt(self):
         name, ok = getText("Enter a name for the new prompt:", parent=self)
         if not ok or not name.strip():
             return
-        # text, ok = getText("Enter the prompt text:", parent=self)
-        # if not ok:
-        #     return
+
         new_entry = {"name": name, "template": ""}
         key = str(uuid.uuid4())
         self.prompt_templates[key] = new_entry
@@ -1597,11 +1925,13 @@ class SavedPromptManagerDialog(QDialog, ChoosersMixin):
     def rename_prompt(self):
         if not self.selected_prompt:
             return
-        new_name, ok = getText(
-            "Rename prompt:", default=self.selected_prompt[2], parent=self
-        )
+
+        # self.selected_prompt[2] is likely the display text, use the name from the dict
+        current_name = self.selected_prompt[1]["name"]
+        new_name, ok = getText("Rename prompt:", default=current_name, parent=self)
         if not ok or not new_name.strip():
             return
+
         self.selected_prompt[1]["name"] = new_name.strip()
 
         save_saved_prompts(self.prompt_templates)
@@ -1611,6 +1941,8 @@ class SavedPromptManagerDialog(QDialog, ChoosersMixin):
         if not self.selected_prompt:
             return
 
+        # Confirmation dialog is highly recommended here, but not requested
+
         del self.prompt_templates[self.selected_prompt[0]]
 
         save_saved_prompts(self.prompt_templates)
@@ -1619,18 +1951,54 @@ class SavedPromptManagerDialog(QDialog, ChoosersMixin):
     def get_selected_prompt_template(self) -> Optional[str]:
         if self.selected_prompt:
             return self.selected_prompt[1]["template"]
-        return None
+        return
+
+    def closeEvent(self, event: QCloseEvent):
+        """Handles the dialog closing event, checking for unsaved changes."""
+        if not self.is_edited:
+            # No unsaved changes, close normally
+            event.accept()
+            return
+
+        # Unsaved changes, prompt user
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Unsaved Changes")
+        msg.setText("The current prompt template has unsaved changes.")
+        msg.setInformativeText(
+            "Do you want to save the changes, discard them, or cancel closing?"
+        )
+
+        # Define buttons
+        save_btn = msg.addButton("Save", QMessageBox.AcceptRole)
+        discard_btn = msg.addButton("Discard", QMessageBox.RejectRole)
+        cancel_btn = msg.addButton("Cancel", QMessageBox.DestructiveRole)
+
+        msg.exec()
+
+        if msg.clickedButton() == save_btn:
+            # User chose Save: save and then accept closing
+            self.save_edited_prompt()
+            event.accept()
+        elif msg.clickedButton() == discard_btn:
+            # User chose Discard: accept closing without saving
+            event.accept()
+        elif msg.clickedButton() == cancel_btn:
+            # User chose Cancel: ignore the close event
+            event.ignore()
+        else:
+            # Fallback for unexpected closure
+            event.ignore()
 
 
 # --- open_prompt_text_dialog_action ---
-def open_saved_prompts_manager(current_mw_ref: QMainWindow, parent: QWidget):
-    dialog = SavedPromptManagerDialog(current_mw_ref=current_mw_ref, parent=parent)
+def open_saved_prompts_manager():
+    dialog = SavedPromptManagerDialog()
     dialog.exec()
 
 
 # --- open_prompt_text_dialog_action ---
-def open_prompt_text_dialog_action(current_mw_ref: QMainWindow):
-    dialog = PromptFromTextDialog(current_mw_ref=current_mw_ref)
+def open_prompt_text_dialog_action():
+    dialog = PromptFromTextDialog()
     dialog.exec()
 
 
@@ -1638,14 +2006,11 @@ def open_prompt_text_dialog_action(current_mw_ref: QMainWindow):
 class ConfigDialog(QDialog):
     def __init__(
         self,
-        parent: Optional[QWidget] = None,
-        config_data_override: Optional[Dict] = None,
-        current_mw_ref: Optional[QMainWindow] = None,
+        parent: QWidget | None = None,
+        config_data_override: dict | None = None,
         addon_name_param: str = "",
     ):
-        super().__init__(parent or current_mw_ref or mw)
-        self.mw_instance = current_mw_ref or mw  # Use consistent naming
-        self.logger = get_logger()
+        super().__init__(parent or mw)
         self.resize(1200, 1000)
 
         self.addon_name = addon_name_param
@@ -1653,7 +2018,7 @@ class ConfigDialog(QDialog):
             not self.addon_name
         ):  # Fallback if not provided, though __init__.py should provide it
             self.addon_name = get_addon_name()
-            self.logger.warning(
+            logger.warning(
                 "ConfigDialog initialized without addon_name_param, using get_addon_name()."
             )
 
@@ -1663,9 +2028,8 @@ class ConfigDialog(QDialog):
         else:
             self.config_to_edit = deepcopy(config_data_override)  # Edit a deep copy
 
-
         self.setWindowTitle(f"Zikaria Addon Configuration ({self.addon_name})")
-        # ... (rest of ConfigDialog UI setup as before, using self.mw_instance, self.logger, self.addon_name)
+        # ... (rest of ConfigDialog UI setup as before, using mw, logger, self.addon_name)
         self.main_layout = QVBoxLayout()
 
         self.content_layout = QHBoxLayout()
@@ -1697,9 +2061,9 @@ class ConfigDialog(QDialog):
     def _setup_docs_panel(self):  # Renamed
         self.docs_panel_widget = QTextEdit()
         self.docs_panel_widget.setReadOnly(True)
-        if self.mw_instance.addonManager:
+        if mw.addonManager:
             docs_path = os.path.join(
-                self.mw_instance.addonManager.addonsFolder(),
+                mw.addonManager.addonsFolder(),
                 self.addon_name,
                 "config.md",
             )
@@ -1719,9 +2083,9 @@ class ConfigDialog(QDialog):
     def _init_form_elements(self):  # Renamed
         default_config_keys = {}
 
-        if self.mw_instance.addonManager:
+        if mw.addonManager:
             default_config_keys = (
-                self.mw_instance.addonManager.addonConfigDefaults(self.addon_name) or {}
+                mw.addonManager.addonConfigDefaults(self.addon_name) or {}
             )
 
         handled_keys = set()
@@ -1749,7 +2113,7 @@ class ConfigDialog(QDialog):
         if name in {"create_prompt_template", "complete_prompt_template"}:
             widget = QWidget()
             prompt_template_chooser_instance = PromptTemplateChooser(
-                mw=self.mw_instance,
+                mw=mw,
                 widget=widget,
                 show_prefix_label=False,
                 starting_template=value,
@@ -1762,6 +2126,7 @@ class ConfigDialog(QDialog):
 
             def get_fn():
                 return prompt_template_chooser_instance.selected_template_key()
+
             change_event = prompt_template_chooser_instance.template_changed
 
         elif isinstance(value, bool):
@@ -1769,7 +2134,7 @@ class ConfigDialog(QDialog):
             widget.setChecked(value)
             label = f"{name.replace('_', ' ').title()}:"
             get_fn = widget.isChecked
-            change_event=widget.stateChanged
+            change_event = widget.stateChanged
         elif isinstance(value, int):
             widget = QSpinBox()
             widget.setRange(0, 10000)
@@ -1815,7 +2180,7 @@ class ConfigDialog(QDialog):
             change_event = widget.textChanged
             label = f"{name.replace('_', ' ').title()}:"
         else:
-            self.logger.warning(
+            logger.warning(
                 f"ConfigDialog: Widget creation not fully implemented in this snippet for type {type(value)} (key: {name})."
             )
             return
@@ -1829,7 +2194,7 @@ class ConfigDialog(QDialog):
         }
 
     def _add_remaining_config_ui_elements(self, handled_keys_set: set):  # Renamed
-        self.logger.debug(
+        logger.debug(
             "ConfigDialog: Adding UI for remaining configuration values (those not explicitly handled)."
         )
 
@@ -1888,7 +2253,7 @@ class ConfigDialog(QDialog):
 
     def _update_custom_configs_display(self):  # Renamed
         """Refresh the display of custom configurations."""
-        self.logger.debug("ConfigDialog: Updating custom configs display.")
+        logger.debug("ConfigDialog: Updating custom configs display.")
 
         # Clear existing widgets in the grid
         while self.custom_configs_content_grid_layout.count():
@@ -1910,16 +2275,14 @@ class ConfigDialog(QDialog):
         )  # Span 2 columns for buttons
 
         custom_configs_list = self.config_to_edit.get("custom_config", [])
-        self.logger.debug(
-            f"Found {len(custom_configs_list)} custom configs to display."
-        )
+        logger.debug(f"Found {len(custom_configs_list)} custom configs to display.")
 
         for idx, custom_config_entry in enumerate(custom_configs_list):
             note_type_id, deck_id, settings = custom_config_entry  # settings is a dict
 
             note_type_name = "Any Note Type"
             if note_type_id:
-                nt = self.mw_instance.col.models.get(NotetypeId(note_type_id))
+                nt = mw.col.models.get(NotetypeId(note_type_id))
                 if nt:
                     note_type_name = nt["name"]
                 else:
@@ -1927,7 +2290,7 @@ class ConfigDialog(QDialog):
 
             deck_name = "Any Deck"
             if deck_id:
-                dk = self.mw_instance.col.decks.get(DeckId(deck_id))
+                dk = mw.col.decks.get(DeckId(deck_id))
                 if dk:
                     deck_name = dk["name"]
                 else:
@@ -1959,9 +2322,7 @@ class ConfigDialog(QDialog):
             self.custom_configs_content_grid_layout.addWidget(delete_button, idx + 1, 3)
 
     def _add_or_edit_custom_config_entry(self, index: Optional[int] = None):  # Renamed
-        self.logger.debug(
-            f"ConfigDialog: Add/Edit custom config entry at index {index}."
-        )
+        logger.debug(f"ConfigDialog: Add/Edit custom config entry at index {index}.")
 
         custom_configs_list = self.config_to_edit.get("custom_config", [])
         note_type_id_param: Optional[NotetypeId] = None
@@ -1973,23 +2334,22 @@ class ConfigDialog(QDialog):
             note_type_id_param = NotetypeId(entry[0]) if entry[0] else None
             deck_id_param = DeckId(entry[1]) if entry[1] else None
             custom_settings_data = entry[2]  # This is the dictionary of settings
-            self.logger.debug(
+            logger.debug(
                 f"Editing entry: NTID={note_type_id_param}, DID={deck_id_param}, Settings={custom_settings_data}"
             )
         else:
-            self.logger.debug("Creating new custom config entry.")
+            logger.debug("Creating new custom config entry.")
 
         dialog = CustomConfigDialog(
-            parent_dialog=self,
+            parent=self,
             note_type_id_param=note_type_id_param,
             deck_id_param=deck_id_param,
             custom_settings_data=custom_settings_data,  # Pass the dict here
-            current_mw_ref=self.mw_instance,
             addon_name_param=self.addon_name,
         )
 
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.logger.debug("CustomConfigDialog accepted.")
+            logger.debug("CustomConfigDialog accepted.")
             new_note_type_id = dialog.note_type_id_result
             new_deck_id = dialog.deck_id_result
             # dialog.config_to_edit contains the settings edited in CustomConfigDialog
@@ -2000,36 +2360,36 @@ class ConfigDialog(QDialog):
                 new_deck_id if new_deck_id is not None else None,
                 new_settings,
             ]
-            self.logger.debug(f"Updated entry data: {updated_entry}")
+            logger.debug(f"Updated entry data: {updated_entry}")
 
             current_custom_configs = self.config_to_edit.setdefault("custom_config", [])
             if index is None:
                 current_custom_configs.append(updated_entry)
-                self.logger.debug("Appended new custom config.")
+                logger.debug("Appended new custom config.")
             elif index < len(current_custom_configs):
                 current_custom_configs[index] = updated_entry
-                self.logger.debug(f"Updated custom config at index {index}.")
+                logger.debug(f"Updated custom config at index {index}.")
             else:
-                self.logger.error(
+                logger.error(
                     f"Error updating custom config: index {index} out of bounds for list of len {len(current_custom_configs)}"
                 )
 
             self._update_custom_configs_display()
         else:
-            self.logger.debug("CustomConfigDialog cancelled or closed.")
+            logger.debug("CustomConfigDialog cancelled or closed.")
 
     def _delete_custom_config_entry(self, index: int):  # Renamed
         """Delete a custom configuration."""
-        self.logger.debug(
+        logger.debug(
             f"ConfigDialog: Attempting to delete custom config at index {index}."
         )
         custom_configs_list = self.config_to_edit.get("custom_config", [])
         if 0 <= index < len(custom_configs_list):
             custom_configs_list.pop(index)
-            self.logger.info(f"Deleted custom config entry at index {index}.")
+            logger.info(f"Deleted custom config entry at index {index}.")
             self._update_custom_configs_display()
         else:
-            self.logger.warning(
+            logger.warning(
                 f"Could not delete custom config at index {index}: index out of bounds."
             )
 
@@ -2047,7 +2407,7 @@ class ConfigDialog(QDialog):
         self.main_layout.addWidget(button_widget)
 
     def save_configuration_handler(self):  # Renamed
-        self.logger.info(f"Saving configuration for addon '{self.addon_name}'.")
+        logger.info(f"Saving configuration for addon '{self.addon_name}'.")
         updated_data_from_widgets = {}
         for key, data in self.config_widgets_map.items():
             if data["get_fn"]:
@@ -2057,10 +2417,8 @@ class ConfigDialog(QDialog):
         self.config_to_edit.update(updated_data_from_widgets)
         # ... (Handle custom_config and extra_config from their UI elements) ...
 
-        if self.mw_instance.addonManager:
-            self.mw_instance.addonManager.writeConfig(
-                self.addon_name, self.config_to_edit
-            )
+        if mw.addonManager:
+            mw.addonManager.writeConfig(self.addon_name, self.config_to_edit)
 
         # Update the live global config object used by the addon
         live_config = get_config()  # Get the actual global config object
@@ -2073,13 +2431,13 @@ class ConfigDialog(QDialog):
         new_debug_level = (
             logging.DEBUG if live_config.get("debug", False) else logging.INFO
         )
-        if self.logger.level != new_debug_level:
-            self.logger.setLevel(new_debug_level)
-            self.logger.info(
+        if logger.level != new_debug_level:
+            logger.setLevel(new_debug_level)
+            logger.info(
                 f"Log level updated to {logging.getLevelName(new_debug_level)}."
             )
 
-        self.logger.info(f"Configuration for '{self.addon_name}' saved and applied.")
+        logger.info(f"Configuration for '{self.addon_name}' saved and applied.")
         self.accept()
 
 
@@ -2087,20 +2445,18 @@ class ConfigDialog(QDialog):
 class CustomConfigDialog(ConfigDialog, ChoosersMixin):  # Inherits from ConfigDialog
     def __init__(
         self,
-        parent_dialog: ConfigDialog,
-        note_type_id_param: Optional[NotetypeId] = None,
-        deck_id_param: Optional[DeckId] = None,
-        custom_settings_data: Optional[Dict[str, Any]] = None,
-        current_mw_ref: Optional[QMainWindow] = None,
+        parent: ConfigDialog,
+        note_type_id_param: NotetypeId | None = None,
+        deck_id_param: DeckId | None = None,
+        custom_settings_data: dict[str, Any] = None,
         addon_name_param: str = "",
     ):
         self.note_type_id_param = note_type_id_param
         self.deck_id_param = deck_id_param
 
         super().__init__(
-            parent=parent_dialog,
+            parent=parent,
             config_data_override=custom_settings_data,
-            current_mw_ref=current_mw_ref,
             addon_name_param=addon_name_param,
         )
 
@@ -2114,7 +2470,7 @@ class CustomConfigDialog(ConfigDialog, ChoosersMixin):  # Inherits from ConfigDi
         pass
 
     def _init_form_elements(self):
-        self.logger.debug(
+        logger.debug(
             f"CustomConfigDialog: Initializing form elements. Editing: {self.config_to_edit}"
         )
         self.config_widgets_map.clear()
@@ -2142,9 +2498,7 @@ class CustomConfigDialog(ConfigDialog, ChoosersMixin):  # Inherits from ConfigDi
             "max_output_tokens",
         ]
 
-        global_defaults = (
-            self.mw_instance.addonManager.addonConfigDefaults(self.addon_name) or {}
-        )
+        global_defaults = mw.addonManager.addonConfigDefaults(self.addon_name) or {}
 
         for key in overridable_keys:
             current_value = self.config_to_edit.get(key, global_defaults.get(key))
@@ -2161,7 +2515,9 @@ class CustomConfigDialog(ConfigDialog, ChoosersMixin):  # Inherits from ConfigDi
                 change_event = widget_data.get("change_event")
                 if change_event:
                     change_event.connect(
-                        lambda checked=False, k=key, g=widget_data["get_fn"], c=is_active_checkbox: self._sync_checkbox_with_widget(
+                        lambda checked=False, k=key, g=widget_data[
+                            "get_fn"
+                        ], c=is_active_checkbox: self._sync_checkbox_with_widget(
                             k, g, c
                         )
                     )
@@ -2174,7 +2530,7 @@ class CustomConfigDialog(ConfigDialog, ChoosersMixin):  # Inherits from ConfigDi
         self._add_action_buttons()
 
     def save_configuration_handler(self):
-        self.logger.info(
+        logger.info(
             f"CustomConfigDialog: Saving custom configuration for {self.addon_name}."
         )
 
@@ -2193,14 +2549,17 @@ class CustomConfigDialog(ConfigDialog, ChoosersMixin):  # Inherits from ConfigDi
 
         updated_data_from_widgets = {}
         for key, data in self.config_widgets_map.items():
-            if data.get("is_active_checkbox") and not data["is_active_checkbox"].isChecked():
+            if (
+                data.get("is_active_checkbox")
+                and not data["is_active_checkbox"].isChecked()
+            ):
                 continue
 
             if data.get("get_fn"):
                 try:
                     updated_data_from_widgets[key] = data["get_fn"]()
                 except Exception as e:
-                    self.logger.error(
+                    logger.error(
                         f"Error getting value for key {key}: {e}", exc_info=True
                     )
 
@@ -2210,7 +2569,7 @@ class CustomConfigDialog(ConfigDialog, ChoosersMixin):  # Inherits from ConfigDi
         self.note_type_id_result = selected_note_type_id
         self.deck_id_result = selected_deck_id
 
-        self.logger.debug(
+        logger.debug(
             f"CustomConfigDialog: Updated config_to_edit: {self.config_to_edit}"
         )
         self.accept()
@@ -2237,34 +2596,30 @@ class CustomConfigDialog(ConfigDialog, ChoosersMixin):  # Inherits from ConfigDi
         return False
 
     def accept(self) -> None:
-        self.logger.debug("CustomConfigDialog: Accepted.")
+        logger.debug("CustomConfigDialog: Accepted.")
         self._cleanup_choosers()
         super().accept()  # Call QDialog.accept()
 
     def reject(self) -> None:
-        self.logger.debug("CustomConfigDialog: Rejected.")
+        logger.debug("CustomConfigDialog: Rejected.")
         self._cleanup_choosers()
         super().reject()  # Call QDialog.reject()
 
     def closeEvent(self, event):  # Ensure cleanup on any close
-        self.logger.debug("CustomConfigDialog: closeEvent triggered.")
+        logger.debug("CustomConfigDialog: closeEvent triggered.")
         self._cleanup_choosers()
         super().closeEvent(event)
 
 
 # --- show_config_dialog_action ---
-def show_config_dialog_action(current_mw_ref: QMainWindow, addon_name_str: str = None):
-    logger = get_logger()
+def show_config_dialog_action(addon_name_str: str = None):
     logger.debug(f"Showing config dialog for addon: {addon_name_str}")
-    dialog = ConfigDialog(
-        current_mw_ref=current_mw_ref, addon_name_param=addon_name_str
-    )
+    dialog = ConfigDialog()
     dialog.exec()
 
 
 # --- Action functions for menu items (browser related) ---
 def add_debug_menu_to_browser_action(browser_instance: Browser):
-    logger = get_logger()
     config = get_config()
     if config.get("debug", False):
         action = QAction("Zikaria Debug Note", browser_instance)
@@ -2284,7 +2639,6 @@ def add_debug_menu_to_browser_action(browser_instance: Browser):
 def _debug_selected_note_browser_action(
     browser_instance: Browser, selected_nids=None
 ):  # Helper
-    logger = get_logger()
     if selected_nids is None:
         selected_nids = browser_instance.selected_notes()
         if not are_nids_one_notetype(selected_nids, browser_instance):
@@ -2297,9 +2651,7 @@ def _debug_selected_note_browser_action(
     note_object = browser_instance.mw.col.get_note(selected_nids[0])
     if note_object:
         logger.debug(f"Opening DebugDialog for note ID: {note_object.id}")
-        dialog = DebugDialog(
-            note_object, parent=browser_instance, current_mw_ref=browser_instance.mw
-        )
+        dialog = DebugDialog(note_object, parent=browser_instance)
         dialog.exec()
 
 
@@ -2314,7 +2666,6 @@ def are_nids_one_notetype(nids, browser_instance: Browser):
 def on_browser_context_menu_action(
     browser_instance: Browser, menu: QWidget
 ):  # menu is QMenu
-    logger = get_logger()
     config = get_config()
     if not config.get("debug", False):
         return

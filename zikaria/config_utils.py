@@ -1,28 +1,239 @@
 import logging
 import pathlib
-from typing import Optional
+from typing import Any, cast, get_args, get_origin
+
+from anki.decks import DeckId
+from anki.models import NotetypeId
+from anki.notes import Note
 from aqt import mw
+from pydantic import BaseModel, Field, ValidationError
 
-# Load user configuration
-config = (
-    mw.addonManager.getConfig(__name__) if mw.addonManager else {}
-)  # Using __name__ might be an issue here. It should be the addon's name.
-# For now, let's assume it needs to be the root module's __name__
-# This will be fixed later when the main __init__.py is refactored.
-logger = (
-    mw.addonManager.get_logger(__name__)
-    if mw.addonManager
-    else logging.getLogger(__name__)
-)
+assert mw is not None
 
-addon_root_dir = pathlib.Path(__file__).resolve().parent.parent
+try:
+    from rich.logging import RichHandler
+    from rich.traceback import install as install_rich_traceback
+
+    _ = install_rich_traceback(show_locals=True)
+except ImportError:
+    RichHandler = None
+
+from collections.abc import Iterator, MutableMapping
+
+
+class ZikariaBaseModel(BaseModel, MutableMapping):
+    """BaseModel that exposes only fields via mapping interface."""
+
+    class Config:
+        extra = "ignore"
+
+    def __getitem__(self, key: str) -> Any:
+        if key in self.__class__.model_fields:
+            return getattr(self, key)
+        raise KeyError(key)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        if key in self.__class__.model_fields:
+            setattr(self, key, value)
+        else:
+            raise KeyError(key)
+
+    def __delitem__(self, key: str) -> None:
+        if key in self.__class__.model_fields:
+            setattr(self, key, None)
+        else:
+            raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.__class__.model_fields)
+
+    def __len__(self) -> int:
+        return len(self.__class__.model_fields)
+
+    def keys(self) -> Iterator[str]:
+        return self.__class__.model_fields.keys()
+
+    def values(self) -> Iterator[Any]:
+        for k in self.__class__.model_fields:
+            yield getattr(self, k)
+
+    def items(self) -> Iterator[tuple[str, Any]]:
+        for k in self.__class__.model_fields:
+            yield (k, getattr(self, k))
+
+    def update(self, other: dict[str, Any]) -> None:
+        for k, v in other.items():
+            if k in self.__class__.model_fields:
+                setattr(self, k, v)
+
+
+# TODO: get avaiable models from google like:
+#             for model in genai.list_models():
+# if "generateContent" in model.supported_generation_methods:
+#     print(model.name)
+class CustomConfig(ZikariaBaseModel):
+    create_prompt_template: str | None = Field(
+        None, description="Template for note creation prompt"
+    )
+    complete_prompt_template: str | None = Field(
+        None, description="Template for note completion prompt"
+    )
+    model_temperature: float | None = Field(
+        None, description="Temperature for model generation"
+    )
+    model_name: str | None = Field(None, description="Model name for completions")
+    max_output_tokens: int | None = Field(
+        None, description="Maximum output tokens for completions"
+    )
+
+
+type CustomConfigEntry = tuple[NotetypeId | None, DeckId | None, Config]
+
+
+class ZikariaConfig(ZikariaBaseModel):
+    api_key: str = Field(
+        "",
+        description="The API key for accessing Generative AI services. If not provided, the user will be prompted to input it on first run.",
+    )
+    debug: bool = Field(False, description="Enable debug logging")
+    create_prompt_template: str | None = Field(
+        None,
+        description="The base prompt sent to the Generative AI when completing fields in an existing note. This is formatted dynamically.",
+    )
+    complete_prompt_template: str | None = Field(
+        None, description="Template for note completion prompt"
+    )
+    confirm_before_adding_notes: bool = Field(
+        False, description="Require confirmation before adding notes"
+    )
+    model_temperature: float = Field(
+        0.7,
+        description="Temperature for model generation. Lower means more predictive, higher means more creative.",
+    )
+    model_name: str = Field("gpt-3.5-turbo", description="Model name for completions")
+    max_output_tokens: int = Field(
+        512, description="Maximum output tokens for completions"
+    )
+    request_timeout: int = Field(
+        50000,
+        alias="request_timeout_milliseconds",
+        description="The request timeout in miliseconds for getting the gemini client.",
+    )  # Default from original config
+    note_tag: str = Field(
+        "zikria_created", description="Tag to add to notes created by Gemini"
+    )
+    processed_tag: str = Field(
+        "zikaria_processed", description="Tag to add to notes processed by Gemini"
+    )
+    prompt_tag: str = Field(
+        "zikaria_prompt", description="Tag to add to notes with a prompt"
+    )
+    custom_prompt_tag: str = Field(
+        "zikaria_custom_prompt", description="Tag to add to notes with a custom prompt"
+    )
+    complete_tag: str = Field(
+        "zikaria_complete", description="Tag to add to notes that are completed"
+    )
+    json_tag: str = Field(
+        "zikaria_from_json", description="Tag to add to notes created from JSON"
+    )
+    run_on_sync: bool = Field(False, description="Whether to run processing on sync")
+    custom_config: list[CustomConfigEntry] = Field(
+        default_factory=list, description="List of custom configs for note types/decks"
+    )
+
+
+class ConfigProxy(MutableMapping):
+    """Proxy for ZikariaConfig that can be swapped out."""
+
+    def __init__(self, config: ZikariaConfig):
+        self._config = config
+
+    @property
+    def config(self) -> ZikariaConfig:
+        return self._config
+
+    def swap(self, new_config: ZikariaConfig):
+        self._config = new_config
+
+    def __getitem__(self, key):
+        return self._config[key]
+
+    def __setitem__(self, key, value):
+        self._config[key] = value
+
+    def __delitem__(self, key):
+        del self._config[key]
+
+    def __iter__(self):
+        return iter(self._config)
+
+    def __len__(self):
+        return len(self._config)
+
+
+def write_markdown_docs(model: type[BaseModel]) -> str:
+    """Generate compact Markdown documentation for a config model."""
+    lines = ["# Configuration Documentation\n"]
+    for name, field_info in model.model_fields.items():
+        if name == "custom_config":
+            lines.append(
+                "- `custom_config` (list): Per-deck and/or per-note-type configuration overrides. "
+                "Allows setting prompt-related options for specific decks, note types, or combinations. "
+                "Each entry is a tuple: (NotetypeId | None, DeckId | None, CustomConfig)."
+            )
+            continue
+        desc = field_info.description or ""
+        default = field_info.default if field_info.default is not None else "None"
+        typ = getattr(field_info.annotation, "__name__", str(field_info.annotation))
+        line = f"- `{name}` ({typ}, default: {default})"
+        if desc:
+            line += f": {desc}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+type ConfigValue = int | float | bool | str
+type Config = dict[str, ConfigValue]
+type CustomConfigEntry = tuple[NotetypeId | None, DeckId | None, Config]
+type BaseConfig = dict[str, ConfigValue | list[CustomConfigEntry]]
+
+type ConfigType = BaseConfig | ConfigProxy
+
+ADDON_NAME: str = mw.addonManager.addon_from_module(__name__)
+addon_root_dir = pathlib.Path(mw.addonManager.addonsFolder(ADDON_NAME)).resolve()
 user_files_dir = addon_root_dir / "user_files"
 
+# Load user configuration
+config: BaseConfig = cast(BaseConfig, mw.addonManager.getConfig(__name__))
+
+
+logger = mw.addonManager.get_logger(__name__)
+log_level = logging.DEBUG
+
 if config:
-    logger.info(config)
-    logger.setLevel(logging.DEBUG if config.get("debug", False) else logging.INFO)
-else:  # Default logging if config is not loaded (e.g. testing)
-    logger.setLevel(logging.DEBUG)
+    log_level = logging.DEBUG if config.get("debug", False) else logging.INFO
+
+if RichHandler is not None:
+    # Remove existing handlers
+    logger.handlers.clear()
+    # Add RichHandler
+    rich_handler = RichHandler(rich_tracebacks=True)
+    logger.addHandler(rich_handler)
+    logger.propagate = False  # Prevent log records from propagating to parent handlers
+
+logger.setLevel(log_level)
+logger.info("Running with config:\n%r", config)
+
+try:
+    zk = ZikariaConfig(**config)
+    print(zk.model_dump_json(indent=2))
+    zkp = ConfigProxy(zk.model_dump())
+    print(zkp)
+    print(zkp.config)
+    print(write_markdown_docs(ZikariaConfig))
+except ValidationError as e:
+    logger.exception("Not a valid config.")
 
 
 def get_config():
@@ -30,25 +241,11 @@ def get_config():
 
 
 def get_addon_name():
-    return "zikaria"
-
-
-def update_config(text, _):
-    import json
-
-    try:
-        new_config = json.loads(text)
-    except json.JSONDecodeError:
-        return text  # Return original text if error
-
-    global config
-    config.update(new_config)
-    # mw.addonManager.writeConfig(__name__, config) # This should be done by Anki
-    return text
+    return mw.addonManager.addon_from_module(__name__)
 
 
 # Copied from anki_utils.py as it's used by score_custom_config_entry
-def get_deck_ancestor_ids(did: int) -> list[int]:
+def get_deck_ancestor_ids(did: DeckId) -> list[DeckId]:
     """
     Retrieve all ancestors of the given deck ID using Anki's API.
     :param did: Deck ID to find ancestors for.
@@ -59,7 +256,9 @@ def get_deck_ancestor_ids(did: int) -> list[int]:
     return [ancestor["id"] for ancestor in mw.col.decks.parents(did)]
 
 
-def score_custom_config_entry(entry, note_type_id, deck_id):
+def score_custom_config_entry(
+    entry: CustomConfigEntry, note_type_id: NotetypeId, deck_id: DeckId
+):
     """
     Score an entry based on the given note type and deck using Anki's API.
     :param entry: The entry to score (note_type_id, deck_id, options).
@@ -95,10 +294,10 @@ def score_custom_config_entry(entry, note_type_id, deck_id):
 
 
 def filter_and_sort_custom_config_entries(
-    entries: list[tuple[Optional[int], Optional[int], dict]],
-    note_type_id: int,
-    deck_id: int,
-) -> list[tuple[Optional[int], Optional[int], dict]]:
+    entries: list[CustomConfigEntry],
+    note_type_id: NotetypeId,
+    deck_id: DeckId,
+) -> list[CustomConfigEntry]:
     """
     Filter and sort a list of entries based on matching note type and deck IDs.
     :param entries: The list of entries to filter and sort.
@@ -130,7 +329,7 @@ def filter_and_sort_custom_config_entries(
     return sorted_entries
 
 
-def get_effective_config(note_type_id: int, deck_id: int):
+def get_effective_config(note_type_id: NotetypeId, deck_id: DeckId) -> BaseConfig:
     """
     Retrieve the effective configuration for a given note type and deck.
     This function is adapted from ZikariaPrompts.get_effective_config.
@@ -142,10 +341,12 @@ def get_effective_config(note_type_id: int, deck_id: int):
     )
 
     # Start with a copy of the global config
-    effective_config = config.copy()
+    effective_config: BaseConfig = config.copy()
 
     # Custom configurations from the global_config (which should be the main `config` object)
-    custom_config_entries = effective_config.get("custom_config", [])
+    custom_config_entries = cast(
+        list[CustomConfigEntry], effective_config.get("custom_config", [])
+    )
 
     # Ensure note_type_id and deck_id are not None for filtering and sorting
     # The filter_and_sort function expects int, not Optional[int] for these.
@@ -160,28 +361,27 @@ def get_effective_config(note_type_id: int, deck_id: int):
     for i, entry in enumerate(sorted_custom_entries):
         logger.debug("Applying custom config entry #%s: %s", i + 1, entry)
         # entry is (entry_note_type_id, entry_deck_id, settings_dict)
-        settings_to_apply = entry[2]
+        settings_to_apply = {k: v for k, v in entry[2].items() if k}
         effective_config.update(settings_to_apply)
 
     logger.debug("Final effective config: %s", effective_config)
+
     return effective_config
 
 
-def get_effective_config_for_note(
-    note, global_config: dict, current_logger: logging.Logger
-):
+def get_effective_config_for_note(note: Note) -> BaseConfig | None:
     """
     Convenience function to get effective config directly from a note object.
     This function is adapted from ZikariaPrompts.get_effective_config_for_note.
     """
     note_model = note.note_type()
     if not note_model:
-        current_logger.warning(
+        logger.warning(
             "Note has no model (note_type). Cannot determine effective config."
         )
-        return global_config.copy()  # Return a copy of global config
+        return config.copy()  # Return a copy of global config
 
-    note_type_id = note_model["id"]
+    note_type_id = cast(NotetypeId, note_model["id"])
 
     # A note might not have cards, or might have multiple cards.
     # We need a robust way to get a deck_id.
@@ -190,74 +390,32 @@ def get_effective_config_for_note(
     # In such cases, deck_id might be considered None or a default.
     # The original code used `note.cards()[0].did`. This assumes the note has at least one card.
     cards = note.cards()
-    deck_id = cards[0].did if cards else None  # Use None if no cards
+    deck_id: DeckId | None = cards[0].did if cards else None  # Use None if no cards
 
     if deck_id is None:
-        current_logger.debug(
-            "Note has no cards or first card has no deck ID. Using None for deck_id in config resolution."
-        )
+        raise RuntimeError("Note has no cards or first card has no deck ID")
 
-    return get_effective_config(note_type_id, deck_id, global_config, current_logger)
+    return get_effective_config(note_type_id, deck_id)
 
 
-# Ensure __name__ for getConfig/getLogger is correct when this module is imported.
-# This will be addressed when refactoring the main __init__.py.
-# For now, we assume that the add-on manager correctly resolves __name__
-# to the main add-on package name.
-ADDON_NAME = __name__.split(".")[0] if "." in __name__ else __name__
+# TODO: remove this and the hook in __init__.py and rely on the builtin Addon Config management or replace this function with a custom validity check (Pydantic?), which seems to be what it was meant for.
+def update_config(text, _):
+    import json
 
+    try:
+        new_config = json.loads(text)
+    except json.JSONDecodeError:
+        return text  # Return original text if error
 
-def main_config():
     global config
-    if not config and mw.addonManager:
-        config = mw.addonManager.getConfig(ADDON_NAME) or {}
-        if config:
-            logger.info(
-                "Successfully loaded config for %s in main_config()", ADDON_NAME
-            )
-            logger.setLevel(
-                logging.DEBUG if config.get("debug", False) else logging.INFO
-            )
-    return config
+    config.update(new_config)
+    # mw.addonManager.writeConfig(__name__, config) # This should be done by Anki
+    return text
 
 
-def main_logger():
-    global logger
-    # Ensure logger is configured even if initial load failed
-    if not config and not logger.handlers:  # Basic check if logger is unconfigured
-        _logger = (
-            mw.addonManager.get_logger(ADDON_NAME)
-            if mw.addonManager
-            else logging.getLogger(ADDON_NAME)
-        )
-        if _logger:
-            logger = _logger
-            logger.setLevel(
-                logging.DEBUG if main_config().get("debug", False) else logging.INFO
-            )
-            logger.info("Logger re-initialized in main_logger for %s", ADDON_NAME)
-    return logger
-
-
-# Call them once to attempt loading if not already loaded.
-# config = main_config()
-# logger = main_logger()
-
-# Test if mw is available, common issue in modularized Anki addons
-if not hasattr(mw, "addonManager"):
-    # This indicates a potential problem with Anki's environment not being fully available
-    # when this module is loaded. This can happen with older Anki versions or specific load orders.
-    # Fallback or warning:
-    logger.warning(
-        "`mw.addonManager` is not available. Configuration and logger might not be Anki-managed."
-    )
-    # Set a default config if it's empty, to prevent errors if other parts of the code expect a dict.
-    if not config:
-        config = {}
-        logger.info("Initialized config as empty dict due to missing mw.addonManager.")
-
-
-def get_config_value(key: str, default=None):
+def get_config_value(
+    key: str, default: ConfigValue | list[CustomConfigEntry] | None = None
+) -> ConfigValue | list[CustomConfigEntry] | None:
     # Ensures that the config is loaded before trying to get a value.
     # This is a bit redundant if config is loaded at module level, but good for safety.
     # current_config = main_config()

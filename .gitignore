@@ -5,3 +5,5 @@ __pycache__/
 
 # Personal config
 meta.json
+
+user_files/

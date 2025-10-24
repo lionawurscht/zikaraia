@@ -1,24 +1,25 @@
 #!/usr/bin/env python
 
 # Anki add-on boilerplate
-from aqt import mw, gui_hooks
+from aqt import gui_hooks, mw
 from aqt.qt import QAction, qconnect
+
+from .zikaria import anki_utils
+from .zikaria.anki_utils import ensure_tags_exist
 
 # Imports from the new Zikaria modules
 # Note: The ADDON_NAME in config_utils might need to be set to "zikaria" explicitly
 # if __name__ within config_utils doesn't resolve correctly to the addon's root name.
 # For now, we assume it's handled or will be adjusted if issues arise.
-from .zikaria.config_utils import logger, config, update_config, ADDON_NAME
-from .zikaria.anki_utils import ensure_tags_exist
-from .zikaria import anki_utils
+from .zikaria.config_utils import ADDON_NAME, config, logger, update_config
 from .zikaria.core import ZikariaPrompts
 from .zikaria.ui import (
-    show_config_dialog_action,
-    on_process_json_triggered_action,
-    open_prompt_text_dialog_action,
     add_debug_menu_to_browser_action,
     on_browser_context_menu_action,
+    on_process_json_triggered_action,
+    open_prompt_text_dialog_action,
     open_saved_prompts_manager,
+    show_config_dialog_action,
 )
 
 # --- Main Add-on Logic Setup ---
@@ -31,7 +32,7 @@ def zikaria_process_notes_manual_action():  # Renamed for clarity as an action h
     )
     try:
         # mw is passed to ZikariaPrompts, ensuring it uses the correct instance
-        processor = ZikariaPrompts(mw=mw, manual_execution=True)
+        processor = ZikariaPrompts(manual_execution=True)
         processor.process_notes()
     except Exception as e:
         logger.error(f"Error during manual Zikaria processing: {e}", exc_info=True)
@@ -88,7 +89,7 @@ def on_sync_did_finish_hook():
         f"Zikaria ({ADDON_NAME}): Starting automatic note processing after sync."
     )
     try:
-        processor = ZikariaPrompts(mw=mw, manual_execution=False)  # Automatic execution
+        processor = ZikariaPrompts(manual_execution=False)  # Automatic execution
         processor.process_notes()
         logger.info(
             f"Zikaria ({ADDON_NAME}): Automatic note processing finished successfully."
@@ -131,13 +132,11 @@ if mw.addonManager:
     # The setConfigAction is for the gear icon in addon list.
     # It expects a callable that takes no args or (parent_widget).
     # Our ui.show_config_dialog_action expects current_mw.
-    mw.addonManager.setConfigAction(ADDON_NAME, lambda: show_config_dialog_action(mw))
+    mw.addonManager.setConfigAction(ADDON_NAME, lambda: show_config_dialog_action())
 
     # Also add to Tools menu for easier access
     zikaria_config_menu_action = QAction("Configuration", mw)
-    qconnect(
-        zikaria_config_menu_action.triggered, lambda: show_config_dialog_action(mw)
-    )
+    qconnect(zikaria_config_menu_action.triggered, lambda: show_config_dialog_action())
     menu_zikaria.addAction(zikaria_config_menu_action)
 
 
@@ -146,7 +145,7 @@ if mw.addonManager:
 zikaria_process_json_menu_action = QAction("Import from JSON", mw)
 qconnect(
     zikaria_process_json_menu_action.triggered,
-    lambda: on_process_json_triggered_action(mw),
+    lambda: on_process_json_triggered_action(),
 )
 menu_zikaria.addAction(zikaria_process_json_menu_action)
 
@@ -155,14 +154,14 @@ menu_zikaria.addAction(zikaria_process_json_menu_action)
 zikaria_create_from_text_menu_action = QAction("Create Card from Prompt", mw)
 qconnect(
     zikaria_create_from_text_menu_action.triggered,
-    lambda: open_prompt_text_dialog_action(mw),
+    lambda: open_prompt_text_dialog_action(),
 )
 menu_zikaria.addAction(zikaria_create_from_text_menu_action)
 
 zikaria_manage_saved_prompts = QAction("Manage Saved Prompts", mw)
 qconnect(
     zikaria_manage_saved_prompts.triggered,
-    lambda: open_saved_prompts_manager(mw, mw),
+    lambda: open_saved_prompts_manager(),
 )
 menu_zikaria.addAction(zikaria_manage_saved_prompts)
 
