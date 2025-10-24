@@ -1,18 +1,19 @@
 # Configuration Documentation
 
-- **api_key**: The API key for accessing Generative AI services. If not provided, the user will be prompted to input it on first run.
-- **create_prompt**: The base prompt sent to the Generative AI when creating new notes from a prompt. This is formatted dynamically.
-- **complete_prompt**: The base prompt sent to the Generative AI when completing fields in an existing note. This is formatted dynamically.
-- **confirm_before_adding_notes**: Boolean indicating if the user should confirm before adding new notes to the collection.
-- **debug**: Boolean indicating if debug-level logging should be enabled for the Zikaria add-on.
-- **model_temperature**: Float for controlling the temperature of the Generative AI responses (e.g., 0.1 for more deterministic output).
-- **model_name**: String representing the model name used for Generative AI processing (e.g., gemini-1.5-flash-latest).
-- **max_output_tokens**: Integer for specifying the maximum output tokens in the Generative AI response.
-- **note_tag**: Tag applied to new notes created by the Zikaria add-on.
-- **processed_tag**: Tag applied to prompt notes after they are processed by the Zikaria add-on.
-- **prompt_tag**: Tag used to identify notes whose first field content will be used as a prompt for the Zikaria add-on to create new notes.
-- **custom_prompt_tag**: Tag used to indicate that a note's first field contains a custom prompt format to be used by Zikaria.
-- **complete_tag**: Tag used to identify notes that Zikaria should attempt to complete by filling in missing fields.
-- **json_tag**: Tag applied to notes that are imported from JSON data using the Zikaria add-on's "Process JSON Input" feature.
-- **run_on_sync**: Boolean to determine if Zikaria's note processing should automatically run after synchronization.
-- **custom_config**: A list of custom configurations that can override the global settings for specific note types and/or decks. Each entry defines conditions (note type, deck) and the settings to apply.
+- `api_key` (str, default: ): The API key for accessing Generative AI services. If not provided, the user will be prompted to input it on first run.
+- `debug` (bool, default: False): Enable debug logging
+- `create_prompt_template` (str | None, default: None): The base prompt sent to the Generative AI when completing fields in an existing note. This is formatted dynamically.
+- `complete_prompt_template` (str | None, default: None): Template for note completion prompt
+- `confirm_before_adding_notes` (bool, default: False): Require confirmation before adding notes
+- `model_temperature` (float, default: 0.5): Temperature for model generation. Lower means more predictive, higher means more creative.
+- `model_name` (str, default: gemini-2.5-flash): Model name for completions
+- `max_output_tokens` (int, default: 512): Maximum output tokens for completions
+- `request_timeout` (int, default: 1000): The request timeout in milliseconds for getting the gemini client.
+- `note_tag` (str, default: zikria_created): Tag to add to notes created by Gemini
+- `processed_tag` (str, default: zikaria_processed): Tag to add to notes processed by Gemini
+- `prompt_tag` (str, default: zikaria_prompt): Tag to add to notes with a prompt
+- `custom_prompt_tag` (str, default: zikaria_custom_prompt): Tag to add to notes with a custom prompt
+- `complete_tag` (str, default: zikaria_complete): Tag to add to notes that are completed
+- `json_tag` (str, default: zikaria_from_json): Tag to add to notes created from JSON
+- `run_on_sync` (bool, default: False): Whether to run processing on sync
+- `custom_config` (list): Per-deck and/or per-note-type configuration overrides. Allows setting prompt-related options for specific decks, note types, or combinations. Each entry is a tuple: (NotetypeId | None, DeckId | None, CustomConfig).

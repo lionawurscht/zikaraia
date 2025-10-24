@@ -22,7 +22,7 @@ from tenacity import (
 )
 
 from .anki_utils import gemini_client_proxy, normalize_ai_response
-from .config_utils import ConfigType, get_config, get_effective_config, logger
+from .config_utils import ConfigType, config_proxy, get_effective_config, logger
 from .prompts import (
     PromptMode,
     generate_pydantic_class,
@@ -73,12 +73,11 @@ class ZikariaPrompts:
     manual_execution: bool = False
 
     def __post_init__(self):
-        self.config = get_config()  # Get config instance for the class
         self.thread_pool = QThreadPool.globalInstance()
-        self.chunk_size = self.config.get("ai_chunk_size", 10)
-        self.max_parse_retries = self.config.get("ai_parse_max_retries", 3)
-        self.max_api_retries = self.config.get("ai_api_max_retries", 3)
-        self.api_retry_start_delay = self.config.get(
+        self.chunk_size = config_proxy.get("ai_chunk_size", 10)
+        self.max_parse_retries = config_proxy.get("ai_parse_max_retries", 3)
+        self.max_api_retries = config_proxy.get("ai_api_max_retries", 3)
+        self.api_retry_start_delay = config_proxy.get(
             "ai_api_retry_start_delay", 2
         )  # seconds
 
@@ -101,9 +100,9 @@ class ZikariaPrompts:
         #         showInfo("Collection is not available.", parent=mw)
         #     return
 
-        prompt_tag_val = self.config.get("prompt_tag", "zikaria_prompt")
-        processed_tag_val = self.config.get("processed_tag", "zikaria_processed")
-        complete_tag_val = self.config.get("complete_tag", "zikaria_complete")
+        prompt_tag_val = config_proxy.get("prompt_tag", "zikaria_prompt")
+        processed_tag_val = config_proxy.get("processed_tag", "zikaria_processed")
+        complete_tag_val = config_proxy.get("complete_tag", "zikaria_complete")
 
         create_notes_ids = col.find_notes(
             f"tag:{prompt_tag_val} -tag:{processed_tag_val}"
@@ -499,7 +498,7 @@ class ZikariaPrompts:
         global_tags: str | None = None,
     ):
 
-        if self.config.get("confirm_before_adding_notes", False):
+        if config_proxy.get("confirm_before_adding_notes", False):
             confirmed_notes_map = display_notes_confirmation_dialog(
                 notes_data_map=notes_map, parent=mw, global_tags=global_tags
             )
@@ -541,7 +540,7 @@ class ZikariaPrompts:
         col = mw.col
 
         default_tags = set(default_tags or [])
-        config_note_tag = self.config.get("note_tag")
+        config_note_tag = config_proxy.get("note_tag")
         if config_note_tag:
             default_tags.add(config_note_tag)
 
@@ -565,10 +564,10 @@ class ZikariaPrompts:
             )
 
     def _finalize_create_note(self, create_note: Note):
-        create_note.add_tag(self.config.get("processed_tag", "zikaria_processed"))
+        create_note.add_tag(config_proxy.get("processed_tag", "zikaria_processed"))
         mw.col.update_note(note=create_note)
 
-        if self.config.get("suspend_processed_prompt_notes", True):  # Default true
+        if config_proxy.get("suspend_processed_prompt_notes", True):  # Default true
             cards_to_suspend = create_note.card_ids()
             if cards_to_suspend:
                 mw.col.sched.suspend_cards(ids=cards_to_suspend)
@@ -613,21 +612,16 @@ class ZikariaPrompts:
                     str(field_value) if field_value is not None else ""
                 )
 
-        original_note.add_tag(self.config.get("processed_tag", "zikaria_processed"))
+        original_note.add_tag(config_proxy.get("processed_tag", "zikaria_processed"))
         col.update_note(note=original_note)
         logger.info("Updated note %s with data: %s", original_note.id, note_data)
 
     def _get_effective_config_for_note(self, note: Note) -> dict:  # Helper method
         # get_effective_config is from config_utils
         # It needs note_type_id and deck_id
-        note_model = note.note_type()
-        if not note_model:
-            logger.warning(
-                f"Note {note.id} has no model. Using global config as effective config."
-            )
-            return self.config.copy()  # Return a copy of the global config
+        note_type = note.note_type()
 
-        note_type_id = note_model["id"]
+        note_type_id = note_type["id"]
         deck_id = note.cards()[0].did if note.cards() else None
 
         return get_effective_config(note_type_id, deck_id)

@@ -13,7 +13,7 @@ from aqt import mw
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
 # Use accessors for config and logger
-from .config_utils import ConfigProxy, ConfigType, config, get_config_value, logger
+from .config_utils import ConfigProxy, ConfigType, config_data, get_config_value, logger
 from .prompt_store import load_saved_prompts
 
 type PromptMode = Literal["create", "complete"]
@@ -57,7 +57,7 @@ class CustomFormatter(string.Formatter):
         :param schema_data: A JSON-serializable structure
         """
         self._note_type: NotetypeDict = note_type
-        self._example_count: int = example_count or config["example_count"]
+        self._example_count: int = example_count or config_data["example_count"]
         self._dummy_keys: set[str] = set() if dummy_keys is None else set(dummy_keys)
 
         self._examples: object = object()
@@ -345,7 +345,7 @@ def get_prompt_text(
     Formats a base prompt with note data, schema, and examples.
     Schema and examples are generated if their placeholders are in the base_prompt.
     """
-    config_ = config_ or config
+    config_ = config_ or config_data
     example_count = config_.get("example_notes_count", 10)
     formatter = CustomFormatter(
         note_type=note_type,
@@ -415,7 +415,7 @@ def get_base_prompt_by_mode(
     """
     Retrieves the base prompt template for a given mode from saved prompts.
     """
-    config_ = config_ or config
+    config_ = config_ or config_data
     saved_prompts = load_saved_prompts()
 
     prompt_template_uuid = config_.get(f"{mode}_prompt_template")

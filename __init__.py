@@ -11,7 +11,7 @@ from .zikaria.anki_utils import ensure_tags_exist
 # Note: The ADDON_NAME in config_utils might need to be set to "zikaria" explicitly
 # if __name__ within config_utils doesn't resolve correctly to the addon's root name.
 # For now, we assume it's handled or will be adjusted if issues arise.
-from .zikaria.config_utils import ADDON_NAME, config, logger, update_config
+from .zikaria.config_utils import ADDON_NAME, config_proxy, logger, update_config
 from .zikaria.core import ZikariaPrompts
 from .zikaria.ui import (
     add_debug_menu_to_browser_action,
@@ -66,7 +66,7 @@ def on_sync_did_finish_hook():
     )
 
     # Access config via the imported config object
-    if not config.get("run_on_sync", False):
+    if not config_proxy.run_on_sync:
         logger.info(
             f"Zikaria ({ADDON_NAME}): Skipping note processing on sync (run_on_sync is false)."
         )
@@ -102,7 +102,7 @@ def on_sync_did_finish_hook():
 
 # --- Hook Registrations ---
 # update_config is directly imported from config_utils and can be used by the hook.
-gui_hooks.addon_config_editor_will_update_json.append(update_config)
+# gui_hooks.addon_config_editor_will_update_json.append(update_config)
 
 gui_hooks.main_window_did_init.append(on_main_window_did_init_hook)
 gui_hooks.sync_did_finish.append(on_sync_did_finish_hook)

@@ -1,14 +1,12 @@
 import logging
 import pathlib
-from typing import Any, cast, get_args, get_origin
+from typing import Any, cast
 
 from anki.decks import DeckId
 from anki.models import NotetypeId
 from anki.notes import Note
 from aqt import mw
 from pydantic import BaseModel, Field, ValidationError
-
-assert mw is not None
 
 try:
     from rich.logging import RichHandler
@@ -107,17 +105,18 @@ class ZikariaConfig(ZikariaBaseModel):
         False, description="Require confirmation before adding notes"
     )
     model_temperature: float = Field(
-        0.7,
+        0.5,
         description="Temperature for model generation. Lower means more predictive, higher means more creative.",
     )
-    model_name: str = Field("gpt-3.5-turbo", description="Model name for completions")
+    model_name: str = Field(
+        "gemini-2.5-flash", description="Model name for completions"
+    )
     max_output_tokens: int = Field(
         512, description="Maximum output tokens for completions"
     )
     request_timeout: int = Field(
-        50000,
-        alias="request_timeout_milliseconds",
-        description="The request timeout in miliseconds for getting the gemini client.",
+        1000,
+        description="The request timeout in milliseconds for getting the gemini client.",
     )  # Default from original config
     note_tag: str = Field(
         "zikria_created", description="Tag to add to notes created by Gemini"
@@ -156,6 +155,9 @@ class ConfigProxy(MutableMapping):
     def swap(self, new_config: ZikariaConfig):
         self._config = new_config
 
+    def __getattr__(self, attr):
+        return self._config[attr]
+
     def __getitem__(self, key):
         return self._config[key]
 
@@ -163,6 +165,9 @@ class ConfigProxy(MutableMapping):
         self._config[key] = value
 
     def __delitem__(self, key):
+        raise RuntimeError(
+            "To delete a key from the config, access the ._config attribute directly."
+        )
         del self._config[key]
 
     def __iter__(self):
@@ -205,14 +210,48 @@ addon_root_dir = pathlib.Path(mw.addonManager.addonsFolder(ADDON_NAME)).resolve(
 user_files_dir = addon_root_dir / "user_files"
 
 # Load user configuration
-config: BaseConfig = cast(BaseConfig, mw.addonManager.getConfig(__name__))
+config_data: BaseConfig = cast(BaseConfig, mw.addonManager.getConfig(ADDON_NAME))
 
+try:
+    new_config = ZikariaConfig(**config_data)
+except ValidationError as e:
+    raise RuntimeError(f"Config is invalid: {config_data}") from e
+
+config_proxy = ConfigProxy(new_config)
+# print(config_proxy.config)
+
+
+config_docs_path = addon_root_dir / "config.md"
+config_json_path = addon_root_dir / "config.json"
+
+# Write config.md if changed
+new_docs = write_markdown_docs(ZikariaConfig)
+if config_docs_path.exists():
+    with open(config_docs_path, "r", encoding="utf-8") as f:
+        old_docs = f.read()
+else:
+    old_docs = ""
+
+if old_docs != new_docs:
+    with open(config_docs_path, "w", encoding="utf-8") as f:
+        f.write(new_docs)
+
+# Write config.json if changed
+empty_config = ZikariaConfig()
+new_json = empty_config.model_dump_json(indent=2)
+if config_json_path.exists():
+    with open(config_json_path, "r", encoding="utf-8") as f:
+        old_json = f.read()
+else:
+    old_json = ""
+if old_json != new_json:
+    with open(config_json_path, "w", encoding="utf-8") as f:
+        f.write(new_json)
 
 logger = mw.addonManager.get_logger(__name__)
 log_level = logging.DEBUG
 
-if config:
-    log_level = logging.DEBUG if config.get("debug", False) else logging.INFO
+log_level = logging.DEBUG if config_proxy.debug else logging.INFO
 
 if RichHandler is not None:
     # Remove existing handlers
@@ -223,21 +262,11 @@ if RichHandler is not None:
     logger.propagate = False  # Prevent log records from propagating to parent handlers
 
 logger.setLevel(log_level)
-logger.info("Running with config:\n%r", config)
-
-try:
-    zk = ZikariaConfig(**config)
-    print(zk.model_dump_json(indent=2))
-    zkp = ConfigProxy(zk.model_dump())
-    print(zkp)
-    print(zkp.config)
-    print(write_markdown_docs(ZikariaConfig))
-except ValidationError as e:
-    logger.exception("Not a valid config.")
+logger.info("Running with config:\n%r", config_data)
 
 
 def get_config():
-    return config
+    return config_proxy
 
 
 def get_addon_name():
@@ -341,7 +370,8 @@ def get_effective_config(note_type_id: NotetypeId, deck_id: DeckId) -> BaseConfi
     )
 
     # Start with a copy of the global config
-    effective_config: BaseConfig = config.copy()
+    #
+    effective_config: BaseConfig = config_proxy.config.model_dump()
 
     # Custom configurations from the global_config (which should be the main `config` object)
     custom_config_entries = cast(
@@ -379,7 +409,7 @@ def get_effective_config_for_note(note: Note) -> BaseConfig | None:
         logger.warning(
             "Note has no model (note_type). Cannot determine effective config."
         )
-        return config.copy()  # Return a copy of global config
+        return config_data.copy()  # Return a copy of global config
 
     note_type_id = cast(NotetypeId, note_model["id"])
 
@@ -399,27 +429,34 @@ def get_effective_config_for_note(note: Note) -> BaseConfig | None:
 
 
 # TODO: remove this and the hook in __init__.py and rely on the builtin Addon Config management or replace this function with a custom validity check (Pydantic?), which seems to be what it was meant for.
-def update_config(text, _):
-    import json
-
+def update_config(updated_config_data):
     try:
-        new_config = json.loads(text)
-    except json.JSONDecodeError:
-        return text  # Return original text if error
+        updated_config = ZikariaConfig(**updated_config_data)
+    except ValidationError as e:
+        raise RuntimeError(f"Updated config is invalid: {updated_config_data}") from e
 
-    global config
-    config.update(new_config)
-    # mw.addonManager.writeConfig(__name__, config) # This should be done by Anki
-    return text
+    config_proxy.swap(updated_config)
+
+    # Update logger level if debug status changed
+
+    new_debug_level = logging.DEBUG if config_proxy.debug else logging.INFO
+    if logger.level != new_debug_level:
+        logger.setLevel(new_debug_level)
+        logger.info(f"Log level updated to {logging.getLevelName(new_debug_level)}.")
+
+    mw.addonManager.writeConfig(
+        ADDON_NAME, updated_config.model_dump()
+    )  # This should be done by Anki
 
 
+# legacy helper function, should just call .get on the config_proxy directly
 def get_config_value(
     key: str, default: ConfigValue | list[CustomConfigEntry] | None = None
 ) -> ConfigValue | list[CustomConfigEntry] | None:
     # Ensures that the config is loaded before trying to get a value.
     # This is a bit redundant if config is loaded at module level, but good for safety.
     # current_config = main_config()
-    return config.get(key, default)
+    return config_proxy.get(key, default)
 
 
 def get_logger():

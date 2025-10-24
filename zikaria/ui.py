@@ -28,8 +28,8 @@ from aqt.utils import getText, shortcut, showInfo, tooltip, tr
 
 from .anki_utils import is_valid_notes_data, replace_nulls_with_empty_strings
 # Imports from other modules in this addon
-from .config_utils import (get_addon_name, get_config, get_effective_config,
-                           logger)
+from .config_utils import (ADDON_NAME, config_proxy, get_effective_config,
+                           logger, update_config)
 from .prompt_store import load_saved_prompts, save_saved_prompts
 from .prompts import (example_notes, generate_pydantic_class,
                       generate_schema_class, get_prompt_text,
@@ -975,7 +975,7 @@ type NotesDataList = list[dict[str, str | list[str]]]
 
 # --- on_process_json_triggered_action ---
 def on_process_json_triggered_action():
-    config = get_config()  # Get current config
+    config = config_proxy  # Get current config
     dialog = JsonInputDialog()
 
     from .core import \
@@ -1021,7 +1021,6 @@ class DebugDialog(QDialog):
     ):
         super().__init__(parent or mw)
         self.note = note
-        self.config = get_config()
         self.setWindowTitle("Debug Note (Zikaria)")
         self.resize(800, 1000)
 
@@ -1597,11 +1596,10 @@ class PromptFromTextDialog(QDialog, ChoosersMixin):
         parent: QWidget | None = None,
     ):
         super().__init__(parent or mw)
-        self.config = get_config()
         self.setWindowTitle("Create Cards from Prompt Text (Zikaria)")
         self.resize(1000, 800)
         self.layout = QVBoxLayout(self)
-        # ... (rest of implementation using logger, self.config, mw)
+        # ... (rest of implementation using logger, config_proxy, mw)
         # Needs access to ZikariaPrompts instance or its methods for AI call.
         # For now, we'll instantiate ZikariaPrompts locally in send_prompt_to_ai_handler.
 
@@ -1649,7 +1647,7 @@ class PromptFromTextDialog(QDialog, ChoosersMixin):
         self.global_tag_edit_widget = TagEdit(self)
         self.global_tag_edit_widget.setCol(mw.col)
         self.layout.addWidget(self.global_tag_edit_widget)
-        if note_tag_val := self.config.get("note_tag"):  # Use self.config
+        if note_tag_val := config_proxy.get("note_tag"):  # Use config_proxy
             self.global_tag_edit_widget.setText(note_tag_val)
 
         self.status_label = QLabel("")
@@ -2013,17 +2011,10 @@ class ConfigDialog(QDialog):
         super().__init__(parent or mw)
         self.resize(1200, 1000)
 
-        self.addon_name = addon_name_param
-        if (
-            not self.addon_name
-        ):  # Fallback if not provided, though __init__.py should provide it
-            self.addon_name = get_addon_name()
-            logger.warning(
-                "ConfigDialog initialized without addon_name_param, using get_addon_name()."
-            )
+        self.addon_name = ADDON_NAME
 
         if config_data_override is None:
-            current_addon_config_obj = get_config()  # Get the live config object
+            current_addon_config_obj = config_proxy.config.model_dump()
             self.config_to_edit = deepcopy(current_addon_config_obj)  # Edit a deep copy
         else:
             self.config_to_edit = deepcopy(config_data_override)  # Edit a deep copy
@@ -2083,10 +2074,9 @@ class ConfigDialog(QDialog):
     def _init_form_elements(self):  # Renamed
         default_config_keys = {}
 
-        if mw.addonManager:
-            default_config_keys = (
-                mw.addonManager.addonConfigDefaults(self.addon_name) or {}
-            )
+        default_config_keys = (
+            mw.addonManager.addonConfigDefaults(self.addon_name) or {}
+        )
 
         handled_keys = set()
         for key, default_value in default_config_keys.items():
@@ -2417,27 +2407,8 @@ class ConfigDialog(QDialog):
         self.config_to_edit.update(updated_data_from_widgets)
         # ... (Handle custom_config and extra_config from their UI elements) ...
 
-        if mw.addonManager:
-            mw.addonManager.writeConfig(self.addon_name, self.config_to_edit)
+        update_config(self.config_to_edit)
 
-        # Update the live global config object used by the addon
-        live_config = get_config()  # Get the actual global config object
-        live_config.clear()
-        live_config.update(self.config_to_edit)  # Update its content
-
-        # Update logger level if debug status changed
-        import logging
-
-        new_debug_level = (
-            logging.DEBUG if live_config.get("debug", False) else logging.INFO
-        )
-        if logger.level != new_debug_level:
-            logger.setLevel(new_debug_level)
-            logger.info(
-                f"Log level updated to {logging.getLevelName(new_debug_level)}."
-            )
-
-        logger.info(f"Configuration for '{self.addon_name}' saved and applied.")
         self.accept()
 
 
@@ -2620,8 +2591,7 @@ def show_config_dialog_action(addon_name_str: str = None):
 
 # --- Action functions for menu items (browser related) ---
 def add_debug_menu_to_browser_action(browser_instance: Browser):
-    config = get_config()
-    if config.get("debug", False):
+    if config_proxy.debug:
         action = QAction("Zikaria Debug Note", browser_instance)
         action.triggered.connect(
             lambda: _debug_selected_note_browser_action(browser_instance)
@@ -2666,8 +2636,7 @@ def are_nids_one_notetype(nids, browser_instance: Browser):
 def on_browser_context_menu_action(
     browser_instance: Browser, menu: QWidget
 ):  # menu is QMenu
-    config = get_config()
-    if not config.get("debug", False):
+    if not config_proxy.debug:
         return
 
     selected_nids = browser_instance.selected_notes()

@@ -15,7 +15,7 @@ from google.genai import types
 from pydantic import BaseModel, ValidationError
 
 # Use accessors for config and logger
-from .config_utils import get_config, get_config_value, logger
+from .config_utils import config_proxy, logger
 from .prompts import generate_pydantic_class
 
 # Globals related to API Key - these are module-level state, managed by functions below.
@@ -162,7 +162,7 @@ class GeminiClientProxy:
 
     def _get_api_key(self):
         # Try config
-        api_key = get_config_value("api_key")
+        api_key = config_proxy.api_key
 
         # Try environment
         if not api_key:
@@ -199,8 +199,10 @@ class GeminiClientProxy:
                 "API key not available or user cancelled. Generative AI configuration aborted."
             )
             return False
-        timeout = get_config_value("request_timeout", 60000)
-        logger.debug("Configuring client with a http timeout of %s seconds.", timeout)
+        timeout = config_proxy.request_timeout
+        logger.debug(
+            "Configuring client with a http timeout of %s seconds.", timeout / 1000
+        )
 
         try:
             self._client = genai.Client(
@@ -230,7 +232,6 @@ gemini_client_proxy = GeminiClientProxy()
 
 def ensure_tags_exist():
     """Ensures that the required tags (from config) are present in the collection."""
-    current_config = get_config()  # Use accessor
 
     if not mw or not mw.col:
         logger.error("Collection (mw.col) is not available for ensure_tags_exist.")
@@ -239,9 +240,9 @@ def ensure_tags_exist():
     col = mw.col
 
     # Get all keys ending with '_tag' from the current config
-    tag_keys_in_config = [key for key in current_config if key.endswith("_tag")]
+    tag_keys_in_config = [key for key in config_proxy if key.endswith("_tag")]
     required_tag_values = [
-        current_config[key] for key in tag_keys_in_config if current_config.get(key)
+        config_proxy[key] for key in tag_keys_in_config if config_proxy.get(key)
     ]
 
     if not required_tag_values:
