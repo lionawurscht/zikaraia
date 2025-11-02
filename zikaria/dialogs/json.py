@@ -18,6 +18,7 @@ from aqt.utils import showInfo
 
 # Imports from other modules in this addon
 from ..config_utils import config, get_effective_config, logger
+from ..prompts import generate_pydantic_class
 from ..types import NotesDataList, ZikariaRequestData, ZikariaResponseData
 from ..ui import ChoosersMixin
 
@@ -126,16 +127,28 @@ def on_process_json_triggered_action():
 
         core_processor = ZikariaPrompts(manual_execution=True)
 
+        pydantic_class = generate_pydantic_class(note_type, enforce_enum=False)
+
+        request_data = ZikariaRequestData(
+            mode="create",
+            # prompt_str=prompt,
+            effective_conf=effective_config,
+            notetype_dict=note_type,
+            metadata={},
+            pydantic_class=pydantic_class,
+        )
+
         notes_data: NotesDataList | None = core_processor._parse_text_into_notes_data(
-            response_text=json_text_data, notetype_dict=note_type
+            response_text=json_text_data,
+            request_data=request_data,
+        )
+
+        logger.debug(
+            "Got this notes_data from _parse_text_into_notes_data: %s", notes_data
         )
 
         notes_response = ZikariaResponseData(
-            notes_data_list=notes_data,
-            request_data=ZikariaRequestData(
-                notetype_dict=note_type,
-                effective_conf=effective_config,
-            ),
+            notes_data_list=notes_data, request_data=request_data
         )
 
         json_tag_val = config.json_tag

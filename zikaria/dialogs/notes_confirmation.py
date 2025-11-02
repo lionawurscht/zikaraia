@@ -291,7 +291,7 @@ class DuplicateResolutionDialog(QDialog):
 
     def _open_dupe_in_browser(self, dupe_nid: int) -> None:
         """Opens the Anki Browser filtered to the specific duplicate Note ID."""
-        aqt.dialogs.open("Browser", mw, search=f"nid:{dupe_nid}")
+        aqt.dialogs.open("Browser", mw, search=(SearchNode(nid=dupe_nid),))
 
     def get_resolved_data(self) -> dict[str, Any]:
         """Collects the final data from the central, authoritative data store."""
