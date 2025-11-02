@@ -1,5 +1,6 @@
 # Configuration Documentation
 
+- `last_prompt_template_key` (str | None, default: None)
 - `api_key` (str, default: ): The API key for accessing Generative AI services. If not provided, the user will be prompted to input it on first run.
 - `debug` (bool, default: False): Enable debug logging
 - `create_prompt_template` (str | None, default: None): The base prompt sent to the Generative AI when completing fields in an existing note. This is formatted dynamically.

@@ -1,11 +1,10 @@
 import enum
 import json
-import random
 import string
 import typing
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Literal, TypedDict
+from typing import Any
 
 from anki.models import NotetypeDict
 from anki.notes import Note
@@ -13,16 +12,10 @@ from aqt import mw
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
 # Use accessors for config and logger
-from .config_utils import ConfigProxy, ConfigType, config_data, get_config_value, logger
+#
+from .config_utils import ConfigType, config, config_data, logger
 from .prompt_store import load_saved_prompts
-
-type PromptMode = Literal["create", "complete"]
-
-
-# class NoteDict(TypedDict, extra_items=str):
-#     tags: list[str]
-# apparently extra_items is not supported until python 3.13
-type NoteDict = dict[str, str | list[str]]
+from .types import NoteDict, PromptMode
 
 
 @dataclass
@@ -128,7 +121,7 @@ def generate_schema_class(note_type: NotetypeDict) -> dict:
 
 
 def generate_pydantic_class(
-    note_type: NotetypeDict, enforce_enum: bool = True
+    note_type: NotetypeDict, enforce_enum: bool = True, with_uuid: bool = False
 ) -> type[BaseModel]:
     """
     Create a Pydantic class dynamically with fields based on a list of values,
@@ -147,7 +140,7 @@ def generate_pydantic_class(
     col = mw.col
     model_id = note_type.get("id")
     field_separator = "\x1f"
-    prompt_tag_val = get_config_value("prompt_tag", "zikaria_prompt")
+    prompt_tag_val = config.get("prompt_tag", "zikaria_prompt")
 
     # 2. Pre-load Data for ALL Category Fields (New Fast Approach)
 
@@ -228,6 +221,14 @@ def generate_pydantic_class(
 
     # 4. Handle the 'tags' Field
     fields["tags"] = (list[str], Field(description="Tags associated with the note."))
+
+    if with_uuid:
+        fields["zikaria__uuid"] = (
+            str,
+            Field(
+                description="A UUID corresponding to the requested input. If present it must match the UUID for the item, which this response it based on."
+            ),
+        )
 
     # 5. Dynamically Create the Pydantic Model Class
     model_name = f'{note_type.get("name", "DynamicNote")}Model'
@@ -356,6 +357,30 @@ def get_prompt_text(
     return formatter.format(base_prompt, prompt=prompt, json_note=json_note)
 
 
+def get_prompt_text_from_string_by_mode(
+    mode: PromptMode,
+    prompt: str,
+    note_type: NotetypeDict,
+    config_: ConfigType | None,
+    dummy_keys: Iterable[str] | None = None,
+) -> str:
+    base_prompt = get_base_prompt_by_mode(mode, config_)
+
+    if not base_prompt:
+        raise RuntimeError(
+            f"Prompt template for {mode} is empty in effective config: {config_}"
+        )
+
+    return get_prompt_text(
+        prompt=prompt,
+        base_prompt=base_prompt,
+        note_type=note_type,
+        config_=config_,
+        dummy_keys=dummy_keys,
+        json_note=None,
+    )
+
+
 def get_prompt_text_from_note(
     note: Note,
     base_prompt: str,
@@ -385,7 +410,7 @@ def get_prompt_text_from_note(
     )
 
 
-def get_prompt_text_by_mode(
+def get_prompt_text_from_note_by_mode(
     mode: PromptMode,
     note: Note,
     config_: ConfigType | None = None,
@@ -418,15 +443,16 @@ def get_base_prompt_by_mode(
     config_ = config_ or config_data
     saved_prompts = load_saved_prompts()
 
+    mode = str(mode)
     prompt_template_uuid = config_.get(f"{mode}_prompt_template")
     if prompt_template_uuid is None:
-        logger.warning(f"No prompt template chosen for %s", mode)
+        logger.warning("No prompt template chosen for %s", mode)
         return None
 
     try:
         base_prompt = saved_prompts[prompt_template_uuid]["template"]
     except KeyError:
-        logger.warning(f"No saved template found for uuid: %s", prompt_template_uuid)
+        logger.warning("No saved template found for uuid: %s", prompt_template_uuid)
         return None
 
     return base_prompt
@@ -436,11 +462,11 @@ def get_create_prompt(note: Note, config_: ConfigType | None = None, **kwargs) -
     """
     Generates the 'create' prompt for a note using the effective configuration.
     """
-    return get_prompt_text_by_mode("create", note, config_, **kwargs)
+    return get_prompt_text_from_note_by_mode("create", note, config_, **kwargs)
 
 
-def get_complete_prompt(note, current_config: dict, **kwargs) -> str:
+def get_complete_prompt(note, config_: dict, **kwargs) -> str:
     """
     Generates the 'complete' prompt for a note using the effective configuration.
     """
-    return get_prompt_text_by_mode("complete", note, config_, **kwargs)
+    return get_prompt_text_from_note_by_mode("complete", note, config_, **kwargs)

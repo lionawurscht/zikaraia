@@ -15,7 +15,7 @@ from google.genai import types
 from pydantic import BaseModel, ValidationError
 
 # Use accessors for config and logger
-from .config_utils import config_proxy, logger
+from .config_utils import config, logger
 from .prompts import generate_pydantic_class
 
 # Globals related to API Key - these are module-level state, managed by functions below.
@@ -67,7 +67,9 @@ def _process_value(
 # ----------------------------------------------------------------------
 
 
-def normalize_ai_response(data: Any, note_type: NoteType) -> list[dict[str, Any]]:
+def normalize_ai_response(
+    data: Any, pydantic_note_model: type[BaseModel]
+) -> list[dict[str, Any]]:
     """
     Normalizes a flexible AI JSON response into a flat list of valid note dictionaries.
 
@@ -85,7 +87,6 @@ def normalize_ai_response(data: Any, note_type: NoteType) -> list[dict[str, Any]
     Returns:
         A list of dictionaries, where each dict is a validated note.
     """
-    pydantic_note_model = generate_pydantic_class(note_type, enforce_enum=False)
 
     if isinstance(data, list):
         # Input is a list (Case 1), process all elements
@@ -162,7 +163,7 @@ class GeminiClientProxy:
 
     def _get_api_key(self):
         # Try config
-        api_key = config_proxy.api_key
+        api_key = config.api_key
 
         # Try environment
         if not api_key:
@@ -199,7 +200,7 @@ class GeminiClientProxy:
                 "API key not available or user cancelled. Generative AI configuration aborted."
             )
             return False
-        timeout = config_proxy.request_timeout
+        timeout = config.request_timeout
         logger.debug(
             "Configuring client with a http timeout of %s seconds.", timeout / 1000
         )
@@ -240,10 +241,8 @@ def ensure_tags_exist():
     col = mw.col
 
     # Get all keys ending with '_tag' from the current config
-    tag_keys_in_config = [key for key in config_proxy if key.endswith("_tag")]
-    required_tag_values = [
-        config_proxy[key] for key in tag_keys_in_config if config_proxy.get(key)
-    ]
+    tag_keys_in_config = [key for key in config if key.endswith("_tag")]
+    required_tag_values = [config[key] for key in tag_keys_in_config if config.get(key)]
 
     if not required_tag_values:
         logger.info("No tags configured with '_tag' suffix to ensure.")

@@ -1,6 +1,6 @@
 import logging
 import pathlib
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 from anki.decks import DeckId
 from anki.models import NotetypeId
@@ -69,7 +69,7 @@ class ZikariaBaseModel(BaseModel, MutableMapping):
 #             for model in genai.list_models():
 # if "generateContent" in model.supported_generation_methods:
 #     print(model.name)
-class CustomConfig(ZikariaBaseModel):
+class ZikariaCustomConfig(ZikariaBaseModel):
     create_prompt_template: str | None = Field(
         None, description="Template for note creation prompt"
     )
@@ -85,10 +85,16 @@ class CustomConfig(ZikariaBaseModel):
     )
 
 
-type CustomConfigEntry = tuple[NotetypeId | None, DeckId | None, Config]
+type ZikariaCustomConfigEntry = tuple[
+    NotetypeId | None, DeckId | None, ZikariaCustomConfig
+]
 
 
 class ZikariaConfig(ZikariaBaseModel):
+    __hidden_attributes__: ClassVar[set[str]] = {"last_prompt_template"}
+
+    last_prompt_template_key: str | None = None
+
     api_key: str = Field(
         "",
         description="The API key for accessing Generative AI services. If not provided, the user will be prompted to input it on first run.",
@@ -137,7 +143,7 @@ class ZikariaConfig(ZikariaBaseModel):
         "zikaria_from_json", description="Tag to add to notes created from JSON"
     )
     run_on_sync: bool = Field(False, description="Whether to run processing on sync")
-    custom_config: list[CustomConfigEntry] = Field(
+    custom_config: list[ZikariaCustomConfigEntry] = Field(
         default_factory=list, description="List of custom configs for note types/decks"
     )
 
@@ -199,25 +205,25 @@ def write_markdown_docs(model: type[BaseModel]) -> str:
 
 
 type ConfigValue = int | float | bool | str
-type Config = dict[str, ConfigValue]
-type CustomConfigEntry = tuple[NotetypeId | None, DeckId | None, Config]
-type BaseConfig = dict[str, ConfigValue | list[CustomConfigEntry]]
+type CustomConfig = dict[str, ConfigValue]
+type CustomConfigEntry = tuple[NotetypeId | None, DeckId | None, CustomConfig]
+type Config = dict[str, ConfigValue | list[CustomConfigEntry]]
 
-type ConfigType = BaseConfig | ConfigProxy
+type ConfigType = ConfigProxy | Config
 
 ADDON_NAME: str = mw.addonManager.addon_from_module(__name__)
 addon_root_dir = pathlib.Path(mw.addonManager.addonsFolder(ADDON_NAME)).resolve()
 user_files_dir = addon_root_dir / "user_files"
 
 # Load user configuration
-config_data: BaseConfig = cast(BaseConfig, mw.addonManager.getConfig(ADDON_NAME))
+config_data = mw.addonManager.getConfig(ADDON_NAME)
 
 try:
     new_config = ZikariaConfig(**config_data)
 except ValidationError as e:
     raise RuntimeError(f"Config is invalid: {config_data}") from e
 
-config_proxy = ConfigProxy(new_config)
+config = ConfigProxy(new_config)
 # print(config_proxy.config)
 
 
@@ -251,7 +257,7 @@ if old_json != new_json:
 logger = mw.addonManager.get_logger(__name__)
 log_level = logging.DEBUG
 
-log_level = logging.DEBUG if config_proxy.debug else logging.INFO
+log_level = logging.DEBUG if config.debug else logging.INFO
 
 if RichHandler is not None:
     # Remove existing handlers
@@ -266,7 +272,7 @@ logger.info("Running with config:\n%r", config_data)
 
 
 def get_config():
-    return config_proxy
+    return config
 
 
 def get_addon_name():
@@ -358,25 +364,24 @@ def filter_and_sort_custom_config_entries(
     return sorted_entries
 
 
-def get_effective_config(note_type_id: NotetypeId, deck_id: DeckId) -> BaseConfig:
+def get_effective_config(note_type_id: NotetypeId, deck_id: DeckId) -> Config:
     """
     Retrieve the effective configuration for a given note type and deck.
     This function is adapted from ZikariaPrompts.get_effective_config.
     """
     logger.debug(
-        "Generating effective config for note type ID: %s, and deck ID: %s.",
+        "Generating effective config for note type ID: %s, and deck ID: %s, original config:\n%s",
         note_type_id,
         deck_id,
+        config.config.model_dump(),
     )
 
     # Start with a copy of the global config
     #
-    effective_config: BaseConfig = config_proxy.config.model_dump()
+    effective_config: Config = config.config.model_dump()
 
     # Custom configurations from the global_config (which should be the main `config` object)
-    custom_config_entries = cast(
-        list[CustomConfigEntry], effective_config.get("custom_config", [])
-    )
+    custom_config_entries = effective_config.get("custom_config", [])
 
     # Ensure note_type_id and deck_id are not None for filtering and sorting
     # The filter_and_sort function expects int, not Optional[int] for these.
@@ -391,7 +396,7 @@ def get_effective_config(note_type_id: NotetypeId, deck_id: DeckId) -> BaseConfi
     for i, entry in enumerate(sorted_custom_entries):
         logger.debug("Applying custom config entry #%s: %s", i + 1, entry)
         # entry is (entry_note_type_id, entry_deck_id, settings_dict)
-        settings_to_apply = {k: v for k, v in entry[2].items() if k}
+        settings_to_apply = {k: v for k, v in entry[2].items() if v is not None}
         effective_config.update(settings_to_apply)
 
     logger.debug("Final effective config: %s", effective_config)
@@ -399,7 +404,7 @@ def get_effective_config(note_type_id: NotetypeId, deck_id: DeckId) -> BaseConfi
     return effective_config
 
 
-def get_effective_config_for_note(note: Note) -> BaseConfig | None:
+def get_effective_config_for_note(note: Note) -> Config | None:
     """
     Convenience function to get effective config directly from a note object.
     This function is adapted from ZikariaPrompts.get_effective_config_for_note.
@@ -429,17 +434,23 @@ def get_effective_config_for_note(note: Note) -> BaseConfig | None:
 
 
 # TODO: remove this and the hook in __init__.py and rely on the builtin Addon Config management or replace this function with a custom validity check (Pydantic?), which seems to be what it was meant for.
-def update_config(updated_config_data):
+def update_config(updated_config_data: ZikariaConfig | Config | ConfigProxy) -> None:
+    if isinstance(updated_config_data, ConfigProxy):
+        updated_config_data = updated_config_data.config
+
+    if isinstance(updated_config_data, ZikariaConfig):
+        updated_config_data = updated_config_data.model_dump()
+
     try:
         updated_config = ZikariaConfig(**updated_config_data)
     except ValidationError as e:
         raise RuntimeError(f"Updated config is invalid: {updated_config_data}") from e
 
-    config_proxy.swap(updated_config)
+    config.swap(updated_config)
 
     # Update logger level if debug status changed
 
-    new_debug_level = logging.DEBUG if config_proxy.debug else logging.INFO
+    new_debug_level = logging.DEBUG if config.debug else logging.INFO
     if logger.level != new_debug_level:
         logger.setLevel(new_debug_level)
         logger.info(f"Log level updated to {logging.getLevelName(new_debug_level)}.")
@@ -447,18 +458,3 @@ def update_config(updated_config_data):
     mw.addonManager.writeConfig(
         ADDON_NAME, updated_config.model_dump()
     )  # This should be done by Anki
-
-
-# legacy helper function, should just call .get on the config_proxy directly
-def get_config_value(
-    key: str, default: ConfigValue | list[CustomConfigEntry] | None = None
-) -> ConfigValue | list[CustomConfigEntry] | None:
-    # Ensures that the config is loaded before trying to get a value.
-    # This is a bit redundant if config is loaded at module level, but good for safety.
-    # current_config = main_config()
-    return config_proxy.get(key, default)
-
-
-def get_logger():
-    # return main_logger()
-    return logger

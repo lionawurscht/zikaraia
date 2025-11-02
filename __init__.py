@@ -6,21 +6,16 @@ from aqt.qt import QAction, qconnect
 
 from .zikaria import anki_utils
 from .zikaria.anki_utils import ensure_tags_exist
-
-# Imports from the new Zikaria modules
-# Note: The ADDON_NAME in config_utils might need to be set to "zikaria" explicitly
-# if __name__ within config_utils doesn't resolve correctly to the addon's root name.
-# For now, we assume it's handled or will be adjusted if issues arise.
-from .zikaria.config_utils import ADDON_NAME, config_proxy, logger, update_config
+from .zikaria.config_dialog import show_config_dialog_action
+from .zikaria.config_utils import ADDON_NAME, config, logger
 from .zikaria.core import ZikariaPrompts
-from .zikaria.ui import (
+from .zikaria.debug_dialog import (
     add_debug_menu_to_browser_action,
     on_browser_context_menu_action,
-    on_process_json_triggered_action,
-    open_prompt_text_dialog_action,
-    open_saved_prompts_manager,
-    show_config_dialog_action,
 )
+from .zikaria.json_dialog import on_process_json_triggered_action
+from .zikaria.notes_from_prompt_dialog import open_notes_from_prompt_dialog_action
+from .zikaria.saved_prompts_manager_dialog import open_saved_prompts_manager
 
 # --- Main Add-on Logic Setup ---
 
@@ -66,7 +61,7 @@ def on_sync_did_finish_hook():
     )
 
     # Access config via the imported config object
-    if not config_proxy.run_on_sync:
+    if not config.run_on_sync:
         logger.info(
             f"Zikaria ({ADDON_NAME}): Skipping note processing on sync (run_on_sync is false)."
         )
@@ -154,7 +149,7 @@ menu_zikaria.addAction(zikaria_process_json_menu_action)
 zikaria_create_from_text_menu_action = QAction("Create Card from Prompt", mw)
 qconnect(
     zikaria_create_from_text_menu_action.triggered,
-    lambda: open_prompt_text_dialog_action(),
+    lambda: open_notes_from_prompt_dialog_action(),
 )
 menu_zikaria.addAction(zikaria_create_from_text_menu_action)
 
