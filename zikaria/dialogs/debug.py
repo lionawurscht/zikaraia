@@ -23,16 +23,16 @@ from aqt.qt import (
 from aqt.utils import showInfo
 
 # Imports from other modules in this addon
-from .config_utils import config, get_effective_config, logger
-from .prompt_store import get_default_prompt_template_key
-from .prompts import (
+from ..config_utils import config, get_effective_config, logger
+from ..prompt_store import get_default_prompt_template_key
+from ..prompts import (
     example_notes,
     generate_pydantic_class,
     generate_schema_class,
     get_prompt_text_from_note,
     get_prompt_text_from_note_by_mode,
 )
-from .saved_prompts_manager_dialog import PromptTemplateChooser
+from .saved_prompts_manager import PromptTemplateChooser
 
 # from aqt.editor import Editor, EditorMode
 

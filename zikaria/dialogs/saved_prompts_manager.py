@@ -19,9 +19,9 @@ from aqt.qt import (
 from aqt.studydeck import StudyDeck
 from aqt.utils import getText, tr
 
-from .config_utils import config, logger, update_config
-from .prompt_store import load_saved_prompts, save_saved_prompts
-from .ui import ChoosersMixin
+from ..config_utils import config, logger, update_config
+from ..prompt_store import load_saved_prompts, save_saved_prompts
+from ..ui import ChoosersMixin
 
 
 class MyStudyDeck(StudyDeck):

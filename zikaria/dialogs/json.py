@@ -17,9 +17,9 @@ from aqt.qt import (
 from aqt.utils import showInfo
 
 # Imports from other modules in this addon
-from .config_utils import config, get_effective_config, logger
-from .types import NotesDataList, ZikariaRequestData, ZikariaResponseData
-from .ui import ChoosersMixin
+from ..config_utils import config, get_effective_config, logger
+from ..types import NotesDataList, ZikariaRequestData, ZikariaResponseData
+from ..ui import ChoosersMixin
 
 # from aqt.editor import Editor, EditorMode
 
@@ -110,7 +110,7 @@ class JsonInputDialog(QDialog, ChoosersMixin):
 def on_process_json_triggered_action():
     dialog = JsonInputDialog()
 
-    from .core import (
+    from ..core import (
         ZikariaPrompts,
     )  # Import locally to avoid circularity at module level
 

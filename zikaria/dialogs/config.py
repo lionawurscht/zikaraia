@@ -39,9 +39,9 @@ from aqt.qt import (
 from aqt.utils import showInfo
 
 # Imports from other modules in this addon
-from .config_utils import ADDON_NAME, config, logger, update_config
-from .saved_prompts_manager_dialog import PromptTemplateChooser
-from .ui import ChoosersMixin
+from ..config_utils import ADDON_NAME, config, logger, update_config
+from ..ui import ChoosersMixin
+from .saved_prompts_manager import PromptTemplateChooser
 
 # from aqt.editor import Editor, EditorMode
 

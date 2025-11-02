@@ -18,7 +18,7 @@ from tenacity import wait_exponential  # Wait strategy for retries
 # Import your existing modules
 from .anki_utils import gemini_client_proxy, normalize_ai_response
 from .config_utils import config, get_effective_config, logger
-from .notes_confirmation_dialog import display_notes_responses_confirmation_dialog
+from .dialogs.notes_confirmation import display_notes_responses_confirmation_dialog
 from .prompts import generate_pydantic_class, get_prompt_text_from_string_by_mode
 from .types import PromptMode, ZikariaRequestData, ZikariaResponseData
 

@@ -26,9 +26,9 @@ from aqt.tagedit import TagEdit
 from aqt.theme import colors, theme_manager
 from aqt.utils import shortcut, tr
 
-from .config_utils import logger
-from .types import ZikariaResponseData
-from .ui import get_duplicate_note_ids_by_checksum
+from ..config_utils import logger
+from ..types import ZikariaResponseData
+from ..ui import get_duplicate_note_ids_by_checksum
 
 
 class DuplicateResolutionDialog(QDialog):

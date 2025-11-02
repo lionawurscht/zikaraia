@@ -6,16 +6,16 @@ from aqt.qt import QAction, qconnect
 
 from .zikaria import anki_utils
 from .zikaria.anki_utils import ensure_tags_exist
-from .zikaria.config_dialog import show_config_dialog_action
 from .zikaria.config_utils import ADDON_NAME, config, logger
 from .zikaria.core import ZikariaPrompts
-from .zikaria.debug_dialog import (
+from .zikaria.dialogs.config import show_config_dialog_action
+from .zikaria.dialogs.debug import (
     add_debug_menu_to_browser_action,
     on_browser_context_menu_action,
 )
-from .zikaria.json_dialog import on_process_json_triggered_action
-from .zikaria.notes_from_prompt_dialog import open_notes_from_prompt_dialog_action
-from .zikaria.saved_prompts_manager_dialog import open_saved_prompts_manager
+from .zikaria.dialogs.json import on_process_json_triggered_action
+from .zikaria.dialogs.notes_from_prompt import open_notes_from_prompt_dialog_action
+from .zikaria.dialogs.saved_prompts_manager import open_saved_prompts_manager
 
 # --- Main Add-on Logic Setup ---
 

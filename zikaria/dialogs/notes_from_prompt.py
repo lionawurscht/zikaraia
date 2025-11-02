@@ -23,16 +23,16 @@ from aqt.utils import tooltip
 from pydantic import BaseModel
 
 # Imports from other modules in this addon
-from .config_utils import config, get_effective_config, logger
-from .prompt_store import get_default_prompt_template_key
-from .prompts import (
+from ..config_utils import config, get_effective_config, logger
+from ..prompt_store import get_default_prompt_template_key
+from ..prompts import (
     generate_pydantic_class,
     get_prompt_text,
     get_prompt_text_from_string_by_mode,
 )
-from .saved_prompts_manager_dialog import PromptTemplateChooser
-from .types import PromptMode, ZikariaRequestData, ZikariaResponseData
-from .ui import ChoosersMixin
+from ..types import PromptMode, ZikariaRequestData, ZikariaResponseData
+from ..ui import ChoosersMixin
+from .saved_prompts_manager import PromptTemplateChooser
 
 # from aqt.editor import Editor, EditorMode
 
@@ -198,7 +198,7 @@ class PromptFromTextDialog(QDialog, ChoosersMixin):
         return requests
 
     def send_prompt_to_ai_handler(self):
-        from .core import ZikariaPrompts, ZikariaTaskManager
+        from ..core import ZikariaPrompts, ZikariaTaskManager
 
         logger.debug("Sending prompt to AI from PromptFromTextDialog.")
 
