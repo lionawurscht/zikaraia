@@ -175,3 +175,9 @@ logger.info(
 # If ADDON_NAME is not set reliably from config_utils early enough, __name__ is a fallback.
 
 # --- End of zikaria/__init__.py ---
+
+# --- New Pipeline Integration ---
+from .zikaria.core import ZikariaCore
+zikaria_pipeline_core = ZikariaCore()
+pipeline_action = mw.form.menuTools.addAction("Process Notes with Pipeline (New)")
+pipeline_action.triggered.connect(lambda: zikaria_pipeline_core.process_notes_with_pipeline(manual_execution=True))

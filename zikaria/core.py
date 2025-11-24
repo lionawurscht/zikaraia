@@ -590,3 +590,48 @@ class ZikariaPrompts:
         original_note.add_tag(config.get("processed_tag", "zikaria_processed"))
         col.update_note(note=original_note)
         logger.info("Updated note %s with data: %s", original_note.id, note_data)
+
+# --- New Pipeline-Based Core ---
+
+from .pipelines.core import PipelineContext, PipelineExecutor
+from .pipelines.definitions import create_notes_from_tags_pipeline
+
+class ZikariaCore:
+    def __init__(self):
+        self.pipeline_executor = None
+
+    def process_notes_with_pipeline(self, manual_execution: bool = False):
+        logger.info("Zikaria: Starting 'Create Notes from Tags' pipeline.")
+
+        prompt_tag = config.get("prompt_tag", "zikaria_prompt")
+        processed_tag = config.get("processed_tag", "zikaria_processed")
+        create_notes_ids = mw.col.find_notes(f"tag:{prompt_tag} -tag:{processed_tag}")
+
+        if not create_notes_ids:
+            if manual_execution:
+                showInfo("No notes with the prompt tag found for processing.", parent=mw)
+            return
+
+        notes = [mw.col.get_note(nid) for nid in create_notes_ids]
+        initial_context = PipelineContext(source_data=notes)
+
+        self.pipeline_executor = PipelineExecutor(create_notes_from_tags_pipeline)
+        self.pipeline_executor.pipeline_finished.connect(self._on_pipeline_finished)
+        self.pipeline_executor.pipeline_error.connect(self._on_pipeline_error)
+        self.pipeline_executor.execute(initial_context)
+
+        mw.progress.start(label="Processing notes with Zikaria...")
+
+    def _on_pipeline_finished(self, context: PipelineContext):
+        mw.progress.finish()
+        logger.info("Zikaria: 'Create Notes from Tags' pipeline finished successfully.")
+        showInfo(f"Pipeline finished. Processed {len(context.processed_notes)} notes.")
+        self.pipeline_executor.deleteLater()
+        self.pipeline_executor = None
+
+    def _on_pipeline_error(self, error: Exception):
+        mw.progress.finish()
+        logger.error("Zikaria: Pipeline execution failed.", exc_info=error)
+        showCritical(f"An error occurred during pipeline execution: {error}")
+        self.pipeline_executor.deleteLater()
+        self.pipeline_executor = None
