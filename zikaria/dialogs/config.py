@@ -1,9 +1,8 @@
 import json
 import os
-
-# --- ConfigDialog & CustomConfigDialog ---
 from copy import deepcopy
-from typing import Any, Dict, Optional
+from types import UnionType
+from typing import Any, Dict, Optional, Union, get_args, get_origin
 
 from anki.decks import DeckId  # Added DeckId
 from anki.models import NotetypeId  # Added NotetypeId
@@ -18,32 +17,35 @@ from aqt import (
     QWidget,
     mw,
 )
-
-# from aqt.operations.note import add_note
-from aqt.qt import (
-    QCheckBox,
-    QDialog,
-    QDoubleSpinBox,
-    QFormLayout,
-    QGridLayout,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QPushButton,
-    QScrollArea,
-    QSpinBox,
-    QTextEdit,
-    QVBoxLayout,
-    QWidget,
-)
+from aqt.qt import QDoubleSpinBox, QGridLayout, QLabel, QLineEdit, QPushButton, QSpinBox
 from aqt.utils import showInfo
+from pydantic.fields import FieldInfo
 
-# Imports from other modules in this addon
-from ..config_utils import ADDON_NAME, config, logger, update_config
+from ..config_utils import (
+    ADDON_NAME,
+    PromptTemplateId,
+    ZikariaConfig,
+    ZikariaCustomConfig,
+    config,
+    logger,
+    update_config,
+)
 from ..ui import ChoosersMixin
 from .saved_prompts_manager import PromptTemplateChooser
 
+# --- ConfigDialog & CustomConfigDialog ---
+
+# from aqt.operations.note import add_note
+
+# Imports from other modules in this addon
+
 # from aqt.editor import Editor, EditorMode
+
+
+def is_prompt_template_id_field(annotation) -> bool:
+    if get_origin(annotation) in (UnionType, Union):
+        return any(arg is PromptTemplateId for arg in get_args(annotation))
+    return annotation is PromptTemplateId
 
 
 class ConfigDialog(QDialog):
@@ -117,33 +119,40 @@ class ConfigDialog(QDialog):
         self.content_layout.addWidget(self.docs_panel_widget)
 
     def _init_form_elements(self):  # Renamed
-        default_config_keys = {}
-
-        default_config_keys = mw.addonManager.addonConfigDefaults(self.addon_name) or {}
+        # default_config_keys = {}
+        #
+        # default_config_keys = mw.addonManager.addonConfigDefaults(self.addon_name) or {}
 
         handled_keys = set()
-        for key, default_value in default_config_keys.items():
+        for key, default_value in ZikariaConfig().model_dump().items():
+            if key in ZikariaConfig.__hidden_attributes__:
+                handled_keys.add(key)
+                continue
+
             current_value = self.config_to_edit.get(key, default_value)
+
             if key == "custom_config":
                 handled_keys.add(key)
                 continue
 
-            widget_data = self._create_config_widget_ui(key, current_value)  # Renamed
+            widget_data = self._create_config_widget_ui(
+                key, current_value, ZikariaConfig.model_fields[key].annotation
+            )  # Renamed
             if widget_data:
                 self.form_layout.addRow(widget_data["label"], widget_data["widget"])
                 self.config_widgets_map[key] = widget_data  # Use renamed map
                 handled_keys.add(key)
 
-        self._add_remaining_config_ui_elements(handled_keys)  # Renamed
+        # self._add_remaining_config_ui_elements(handled_keys)  # Renamed
         self._add_custom_config_ui_section()  # Renamed
         self._add_action_buttons()  # Renamed
 
     def _create_config_widget_ui(
-        self, name: str, value: Any
+        self, name: str, value: Any, annotation
     ) -> dict[str, Any] | None:  # Renamed
         """Create and add a widget for the given config key."""
         change_event = None
-        if name in {"create_prompt_template", "complete_prompt_template"}:
+        if is_prompt_template_id_field(annotation):
             widget = QWidget()
             prompt_template_chooser_instance = PromptTemplateChooser(
                 mw=mw,
@@ -501,23 +510,33 @@ class CustomConfigDialog(ConfigDialog, ChoosersMixin):  # Inherits from ConfigDi
             show_prefix_label=False,
         )
 
-        overridable_keys = [
-            "create_prompt",
-            "complete_prompt",
-            "complete_prompt_template",
-            "create_prompt_template",
-            "confirm_before_adding_notes",
-            "model_temperature",
-            "model_name",
-            "max_output_tokens",
-        ]
+        # overridable_keys = [
+        #     k
+        #     for k in ZikariaCustomConfig.model_fields.keys()
+        #     if k not in ZikariaCustomConfig.__hidden_attributes__
+        # ]
+        # overridable_keys = [
+        #     "create_prompt",
+        #     "complete_prompt",
+        #     "complete_prompt_template",
+        #     "create_prompt_template",
+        #     "confirm_before_adding_notes",
+        #     "model_temperature",
+        #     "model_name",
+        #     "max_output_tokens",
+        # ]
 
-        global_defaults = mw.addonManager.addonConfigDefaults(self.addon_name) or {}
+        global_defaults = ZikariaConfig()
 
-        for key in overridable_keys:
+        for key in ZikariaCustomConfig().model_dump():
+            if key in ZikariaCustomConfig.__hidden_attributes__:
+                continue
+
             current_value = self.config_to_edit.get(key, global_defaults.get(key))
 
-            widget_data = self._create_config_widget_ui(key, current_value)
+            widget_data = self._create_config_widget_ui(
+                key, current_value, ZikariaCustomConfig.model_fields[key].annotation
+            )
             if widget_data:
                 row_layout = QHBoxLayout()
                 is_active_checkbox = QCheckBox()

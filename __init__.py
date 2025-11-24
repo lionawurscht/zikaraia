@@ -13,6 +13,8 @@ from .zikaria.dialogs.debug import (
     add_debug_menu_to_browser_action,
     on_browser_context_menu_action,
 )
+from .zikaria.dialogs.format_string import add_wordlist_export_context_menu
+from .zikaria.dialogs.image_from_prompt import open_image_from_prompt_dialog_action
 from .zikaria.dialogs.json import on_process_json_triggered_action
 from .zikaria.dialogs.notes_from_prompt import open_notes_from_prompt_dialog_action
 from .zikaria.dialogs.saved_prompts_manager import open_saved_prompts_manager
@@ -105,6 +107,7 @@ gui_hooks.sync_did_finish.append(on_sync_did_finish_hook)
 # Browser related hooks from ui.py
 gui_hooks.browser_menus_did_init.append(add_debug_menu_to_browser_action)
 gui_hooks.browser_will_show_context_menu.append(on_browser_context_menu_action)
+gui_hooks.browser_will_show_context_menu.append(add_wordlist_export_context_menu)
 
 
 # --- Menu Item Setup ---
@@ -119,6 +122,12 @@ qconnect(
 
 menu_zikaria.addAction(zikaria_manual_process_action_menu)
 
+zikaria_create_image_menu_action = QAction("Create Image from Prompt", mw)
+qconnect(
+    zikaria_create_image_menu_action.triggered,
+    lambda: open_image_from_prompt_dialog_action(),
+)
+menu_zikaria.addAction(zikaria_create_image_menu_action)
 
 # Configuration dialog action
 # show_config_dialog_action is imported from ui.py

@@ -1,5 +1,6 @@
 import logging
 import pathlib
+import uuid
 from typing import Any, ClassVar, cast
 
 from anki.decks import DeckId
@@ -17,6 +18,40 @@ except ImportError:
     RichHandler = None
 
 from collections.abc import Iterator, MutableMapping
+
+
+class PromptTemplateId:
+    def __init__(self, value: str | None):
+        if value is None:
+            self.value = None
+        else:
+            try:
+                self.value = str(uuid.UUID(value))
+            except ValueError:
+                raise ValueError(f"Invalid UUID: {value}")
+
+    def __str__(self):
+        return self.value if self.value is not None else ""
+
+    def __repr__(self):
+        return f"PromptTemplateId({self.value})"
+
+    def serialize(self) -> str | None:
+        return self.value
+
+    @classmethod
+    def __get_pydantic_json_schema__(cls, core_schema, handler):
+        # For introspection in config UI
+        schema = handler(core_schema)
+        schema["type"] = "string"
+        schema["format"] = "uuid"
+        schema["title"] = "Prompt Template UUID"
+        return schema
+
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source_type, handler):
+        # Use str as the schema type
+        return handler.generate_schema(str)
 
 
 class ZikariaBaseModel(BaseModel, MutableMapping):
@@ -70,16 +105,27 @@ class ZikariaBaseModel(BaseModel, MutableMapping):
 # if "generateContent" in model.supported_generation_methods:
 #     print(model.name)
 class ZikariaCustomConfig(ZikariaBaseModel):
-    create_prompt_template: str | None = Field(
+    __hidden_attributes__: ClassVar[set[str]] = {"last_prompt_template_key"}
+
+    last_prompt_template_key: PromptTemplateId | None = None
+
+    create_prompt_template: PromptTemplateId | None = Field(
         None, description="Template for note creation prompt"
     )
-    complete_prompt_template: str | None = Field(
+    complete_prompt_template: PromptTemplateId | None = Field(
         None, description="Template for note completion prompt"
+    )
+
+    image_prompt_template: PromptTemplateId | None = Field(
+        None, description="Template for image generation"
     )
     model_temperature: float | None = Field(
         None, description="Temperature for model generation"
     )
     model_name: str | None = Field(None, description="Model name for completions")
+    image_model_name: str | None = Field(
+        default="gemini-2.5-flash-image", description="Model name for image generation"
+    )
     max_output_tokens: int | None = Field(
         None, description="Maximum output tokens for completions"
     )
@@ -91,21 +137,24 @@ type ZikariaCustomConfigEntry = tuple[
 
 
 class ZikariaConfig(ZikariaBaseModel):
-    __hidden_attributes__: ClassVar[set[str]] = {"last_prompt_template"}
+    __hidden_attributes__: ClassVar[set[str]] = {"last_prompt_template_key"}
 
-    last_prompt_template_key: str | None = None
+    last_prompt_template_key: PromptTemplateId | None = None
 
     api_key: str = Field(
         "",
         description="The API key for accessing Generative AI services. If not provided, the user will be prompted to input it on first run.",
     )
     debug: bool = Field(False, description="Enable debug logging")
-    create_prompt_template: str | None = Field(
+    create_prompt_template: PromptTemplateId | None = Field(
         None,
         description="The base prompt sent to the Generative AI when completing fields in an existing note. This is formatted dynamically.",
     )
-    complete_prompt_template: str | None = Field(
+    complete_prompt_template: PromptTemplateId | None = Field(
         None, description="Template for note completion prompt"
+    )
+    image_prompt_template: PromptTemplateId | None = Field(
+        None, description="Template for image generation"
     )
     confirm_before_adding_notes: bool = Field(
         False, description="Require confirmation before adding notes"
@@ -115,7 +164,10 @@ class ZikariaConfig(ZikariaBaseModel):
         description="Temperature for model generation. Lower means more predictive, higher means more creative.",
     )
     model_name: str = Field(
-        "gemini-2.5-flash", description="Model name for completions"
+        default="gemini-2.5-flash", description="Model name for completions"
+    )
+    image_model_name: str = Field(
+        default="gemini-2.5-flash-image", description="Model name for image generation"
     )
     max_output_tokens: int = Field(
         512, description="Maximum output tokens for completions"
@@ -187,11 +239,19 @@ def write_markdown_docs(model: type[BaseModel]) -> str:
     """Generate compact Markdown documentation for a config model."""
     lines = ["# Configuration Documentation\n"]
     for name, field_info in model.model_fields.items():
+        if name in model.__hidden_attributes__:
+            continue
         if name == "custom_config":
+            overridable_keys = [
+                k
+                for k in ZikariaCustomConfig.model_fields
+                if k not in ZikariaCustomConfig.__hidden_attributes__
+            ]
             lines.append(
                 "- `custom_config` (list): Per-deck and/or per-note-type configuration overrides. "
                 "Allows setting prompt-related options for specific decks, note types, or combinations. "
-                "Each entry is a tuple: (NotetypeId | None, DeckId | None, CustomConfig)."
+                "Each entry is a tuple: (NotetypeId | None, DeckId | None, CustomConfig). "
+                f"Overridable keys: {', '.join(overridable_keys)}."
             )
             continue
         desc = field_info.description or ""
@@ -364,7 +424,7 @@ def filter_and_sort_custom_config_entries(
     return sorted_entries
 
 
-def get_effective_config(note_type_id: NotetypeId, deck_id: DeckId) -> Config:
+def get_effective_config(note_type_id: NotetypeId, deck_id: DeckId) -> ZikariaConfig:
     """
     Retrieve the effective configuration for a given note type and deck.
     This function is adapted from ZikariaPrompts.get_effective_config.
@@ -401,22 +461,22 @@ def get_effective_config(note_type_id: NotetypeId, deck_id: DeckId) -> Config:
 
     logger.debug("Final effective config: %s", effective_config)
 
-    return effective_config
+    return ZikariaConfig(**effective_config)
 
 
-def get_effective_config_for_note(note: Note) -> Config | None:
+def get_effective_config_for_note(note: Note) -> ZikariaConfig | None:
     """
     Convenience function to get effective config directly from a note object.
     This function is adapted from ZikariaPrompts.get_effective_config_for_note.
     """
-    note_model = note.note_type()
-    if not note_model:
+    note_type = note.note_type()
+    if not note_type:
         logger.warning(
             "Note has no model (note_type). Cannot determine effective config."
         )
         return config_data.copy()  # Return a copy of global config
 
-    note_type_id = cast(NotetypeId, note_model["id"])
+    note_type_id = cast(NotetypeId, note_type["id"])
 
     # A note might not have cards, or might have multiple cards.
     # We need a robust way to get a deck_id.

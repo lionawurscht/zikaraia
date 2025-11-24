@@ -1,6 +1,8 @@
 import uuid
 from typing import Callable, Literal, Optional
 
+from anki.decks import DeckId
+from anki.models import NotetypeId
 from aqt import QMainWindow, QMessageBox, mw
 from aqt.qt import (
     QCloseEvent,
@@ -275,9 +277,9 @@ class PromptTemplateChooser(QHBoxLayout):
         widget: QWidget,
         show_prefix_label: bool = True,
         starting_template: str | None | Literal[False] = False,
-        # note_type_id: Optional[int] = None,
-        # deck_id: Optional[int] = None,
-        on_template_changed: Callable[[str], None] | None = None,
+        on_prompt_template_changed: Callable[[str], None] | None = None,
+        # note_type_id: NotetypeId | None | Literal[False] = False,
+        # deck_id: DeckId | None | Literal[False] = False,
     ) -> None:
         super().__init__()
 
@@ -285,7 +287,7 @@ class PromptTemplateChooser(QHBoxLayout):
         self.mw = mw
         # self.note_type_id = note_type_id
         # self.deck_id = deck_id
-        self.on_template_changed = on_template_changed
+        self.on_prompt_template_changed = on_prompt_template_changed
         self.study_deck = None
 
         self.prompt_templates = load_saved_prompts()
@@ -362,15 +364,8 @@ class PromptTemplateChooser(QHBoxLayout):
 
             self._update_button_label()
 
-            if config["last_prompt_template_key"] != (
-                new_key := self.selected_template_key()
-            ):
-                logger.debug("Prompt template key changed, is: %s", new_key)
-                config["last_prompt_template_key"] = new_key
-                update_config(config)
-
-            if self.on_template_changed:
-                self.on_template_changed(self.selected_template)
+            if self.on_prompt_template_changed:
+                self.on_prompt_template_changed(self.selected_template)
 
             self.template_changed.emit(self.selected_template_key() or "")
 

@@ -17,10 +17,15 @@ from tenacity import wait_exponential  # Wait strategy for retries
 
 # Import your existing modules
 from .anki_utils import gemini_client_proxy, normalize_ai_response
-from .config_utils import config, get_effective_config, logger
+from .config_utils import (
+    config,
+    get_effective_config,
+    get_effective_config_for_note,
+    logger,
+)
 from .dialogs.notes_confirmation import display_notes_responses_confirmation_dialog
 from .prompts import generate_pydantic_class, get_prompt_text_from_string_by_mode
-from .types import PromptMode, ZikariaRequestData, ZikariaResponseData
+from .types import LogContainer, PromptMode, ZikariaRequestData, ZikariaResponseData
 
 # --- New/Adapted Data Structures for Concurrency ---
 
@@ -267,9 +272,9 @@ class ZikariaPrompts:
         # NOTE: The retry logic is best handled *outside* this function, perhaps in the QRunnable itself,
         # but for clean API calling, we keep the core logic here.
 
-        model_name = request_data.effective_conf.get("model_name", "gemini-2.5-flash")
-        max_tokens = request_data.effective_conf.get("max_output_tokens", 1000)
-        temperature = request_data.effective_conf.get("model_temperature", 0.1)
+        model_name = request_data.effective_conf.model_name
+        max_tokens = request_data.effective_conf.max_output_tokens
+        temperature = request_data.effective_conf.model_temperature
 
         config = {
             "max_output_tokens": max_tokens,
@@ -281,6 +286,13 @@ class ZikariaPrompts:
                 or generate_pydantic_class(request_data.notetype_dict)
             ],
         }
+
+        logger.debug(
+            "Calling ai (model_name=%s) for prompt:\n%s\n\n---\n\nconfig:\n%s",
+            model_name,
+            request_data.prompt_str,
+            config,
+        )
 
         try:
             response = gemini_client_proxy.client.models.generate_content(
@@ -354,7 +366,7 @@ class ZikariaPrompts:
         if not note:
             return []
 
-        effective_conf = self._get_effective_config_for_note(note)
+        effective_conf = get_effective_config_for_note(note)
 
         # Prepare notetype dictionary for safe passing to the background thread
         notetype_dict = note.note_type()
@@ -430,7 +442,10 @@ class ZikariaPrompts:
         # ... (Your existing _finalize_notes logic) ...
         # NOTE: The loop needs to handle 'None' keys from standalone tasks gracefully.
 
-        logger.info("_finalize_notes called with: %s", notes_responses)
+        # logger.info(
+        #     "_finalize_notes called with: %s", LogContainer(responses=notes_responses)
+        # )
+
         # final_notes_data_map = {}
         # for original_note, notes_data_list in notes_map.items():
         #     if original_note is not None:
@@ -514,7 +529,6 @@ class ZikariaPrompts:
                 logger.info(f"Suspended cards for processed note {original_note.id}.")
 
     # --- Remaining helper methods from your original code (omitted for brevity) ---
-    # _add_notes, _update_note, _get_effective_config_for_note, etc. remain the same.
 
     # NOTE: The retry logic for AI communication (_send_prompt_to_ai_with_retry)
     # should be adapted to be used *inside* the QRunnable's run method if you want
@@ -576,13 +590,3 @@ class ZikariaPrompts:
         original_note.add_tag(config.get("processed_tag", "zikaria_processed"))
         col.update_note(note=original_note)
         logger.info("Updated note %s with data: %s", original_note.id, note_data)
-
-    def _get_effective_config_for_note(self, note: Note) -> dict:  # Helper method
-        # get_effective_config is from config_utils
-        # It needs note_type_id and deck_id
-        note_type = note.note_type()
-
-        note_type_id = note_type["id"]
-        deck_id = note.cards()[0].did if note.cards() else None
-
-        return get_effective_config(note_type_id, deck_id)

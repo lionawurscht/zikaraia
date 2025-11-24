@@ -23,7 +23,7 @@ from aqt.utils import tooltip
 from pydantic import BaseModel
 
 # Imports from other modules in this addon
-from ..config_utils import config, get_effective_config, logger
+from ..config_utils import config, get_effective_config, logger, update_config
 from ..prompt_store import get_default_prompt_template_key
 from ..prompts import (
     generate_pydantic_class,
@@ -61,6 +61,15 @@ class PromptFromTextDialog(QDialog, ChoosersMixin):
         self.layout.addWidget(self.deck_combo_widget)
         self.layout.addSpacing(16)
 
+        # TODO: Use a custom config entry if notetype of deck are set through the choosers and alter the last_ormpt_template_key in that custom config instead of the global one.
+        def on_prompt_template_changed(prompt_template: tuple[str, str] | None):
+            new_key = prompt_template[0]
+
+            if config["last_prompt_template_key"] != new_key:
+                logger.debug("Prompt template key changed, is: %s", new_key)
+                config["last_prompt_template_key"] = new_key
+                update_config(config)
+
         self.prompt_template_combo_widget = QWidget(self)
         self.prompt_template_chooser_instance = PromptTemplateChooser(
             mw=mw,
@@ -69,8 +78,9 @@ class PromptFromTextDialog(QDialog, ChoosersMixin):
             # starting_prompt = None,
             # note_type_id = self.notetype_chooser_instance.selected_notetype_id,
             # deck_id = self.deck_chooser_instance.selected_deck_id,
-            # on_prompt_changed = None,
+            on_prompt_template_changed=on_prompt_template_changed,
         )
+
         self.layout.addWidget(self.prompt_template_combo_widget)
 
         self.prompt_input_area = QTextEdit()
@@ -155,7 +165,8 @@ class PromptFromTextDialog(QDialog, ChoosersMixin):
 
     @staticmethod
     def _create_requests_with_origin_index(
-        mode: PromptMode,
+        base_prompt: str,
+        # mode: PromptMode,
         prompt_str: str,
         effective_config: dict,
         pydantic_class: type[BaseModel],
@@ -178,15 +189,15 @@ class PromptFromTextDialog(QDialog, ChoosersMixin):
             # meta["origin_index"] = idx
             meta["uuid_to_origin"] = uuid_to_origin
             # TODO: change chunked prompt into json dictionary with uuid for note tracking (so each line gets a uuid) and add a metadata dict, which maps the uuids to the origin indices
-            prompt = get_prompt_text_from_string_by_mode(
-                mode=mode,
+            prompt = get_prompt_text(
+                base_prompt=base_prompt,
                 prompt=chunked_prompt,
                 config_=effective_config,
                 note_type=notetype_dict,
             )
             # Store the origin index in metadata
             req_data = ZikariaRequestData(
-                mode=mode,
+                mode=PromptMode.CREATE,
                 prompt_str=prompt,
                 effective_conf=effective_config,
                 notetype_dict=notetype_dict,
@@ -198,6 +209,12 @@ class PromptFromTextDialog(QDialog, ChoosersMixin):
         return requests
 
     def send_prompt_to_ai_handler(self):
+        base_prompt = self.prompt_template_chooser_instance.selected_template_text()
+        if base_prompt is None:
+            self.prompt_output_area.setPlainText("Selected prompt template is empty")
+            logger.warning("Selected prompt template is empty")
+            return
+
         from ..core import ZikariaPrompts, ZikariaTaskManager
 
         logger.debug("Sending prompt to AI from PromptFromTextDialog.")
@@ -225,7 +242,7 @@ class PromptFromTextDialog(QDialog, ChoosersMixin):
         pydantic_class = generate_pydantic_class(note_type, with_uuid=True)
 
         requests = self._create_requests_with_origin_index(
-            mode=PromptMode.CREATE,
+            base_prompt=base_prompt,
             prompt_str=prompt,
             notetype_dict=note_type,
             effective_config=effective_config,
